@@ -158,25 +158,36 @@ fn parse_installed(json: &str) -> Installed {
     }
 }
 
+/// The outcome of `setup herdr` when herdr has the plugin from somewhere it must not
+/// write over or link: nothing is written or linked then.
+fn leave_alone(installed: &Installed, check: bool) -> Option<Result<String, String>> {
+    match installed {
+        // A GitHub install runs its own release binary and follows releases with
+        // `herdr plugin update`; linking over it would need an uninstall, so leave it be.
+        Installed::GitHub { owner, repo, commit } => {
+            let short = &commit[..commit.len().min(7)];
+            let from = format!("installed from GitHub {owner}/{repo}@{short}");
+            Some(Ok(if check {
+                from
+            } else {
+                format!("{from}\nherdr plugin update {PLUGIN_ID} follows new releases; to run this binary instead, herdr plugin uninstall {PLUGIN_ID} and run claude-deck setup herdr again")
+            }))
+        }
+        Installed::Other(kind) => Some(Err(format!(
+            "{PLUGIN_ID} is installed from an unknown source ({kind}); remove it with herdr before claude-deck setup herdr"
+        ))),
+        Installed::None | Installed::Local(_) => None,
+    }
+}
+
 fn setup_herdr(check: bool) -> Result<String, String> {
     let exe = exe()?;
     let dir = plugin_dir();
     let wanted = manifest(&exe);
     let current = fs::read_to_string(dir.join("herdr-plugin.toml")).unwrap_or_default();
     let installed = installed();
-    // A GitHub install runs its own release binary and follows releases with
-    // `herdr plugin update`; linking over it would need an uninstall, so leave it be.
-    if let Installed::GitHub { owner, repo, commit } = &installed {
-        let short = &commit[..commit.len().min(7)];
-        let from = format!("installed from GitHub {owner}/{repo}@{short}");
-        return Ok(if check {
-            from
-        } else {
-            format!("{from}\nherdr plugin update {PLUGIN_ID} follows new releases; to run this binary instead, herdr plugin uninstall {PLUGIN_ID} and run claude-deck setup herdr again")
-        });
-    }
-    if let Installed::Other(kind) = &installed {
-        return Err(format!("{PLUGIN_ID} is installed from an unknown source ({kind}); remove it with herdr before claude-deck setup herdr"));
+    if let Some(result) = leave_alone(&installed, check) {
+        return result;
     }
     let linked = match installed {
         Installed::Local(path) => Some(path),
@@ -261,16 +272,15 @@ pub fn main(args: &[String]) -> i32 {
             return 2;
         }
     };
-    match result {
-        Ok(message) => {
-            println!("{message}");
-            0
-        }
-        Err(message) => {
-            eprintln!("claude-deck: {message}");
-            1
-        }
+    match &result {
+        Ok(message) => println!("{message}"),
+        Err(message) => eprintln!("claude-deck: {message}"),
     }
+    exit_code(&result)
+}
+
+fn exit_code(result: &Result<String, String>) -> i32 {
+    if result.is_ok() { 0 } else { 1 }
 }
 
 #[cfg(test)]
@@ -293,6 +303,34 @@ mod tests {
         let json = r#"{"id":"cli:plugin","result":{"plugins":[{"plugin_id":"bigsan.claude-deck","plugin_root":"/home/u/.config/herdr/claude-deck-plugin",
             "source":{"kind":"local"}}],"type":"plugin_list"}}"#;
         assert_eq!(parse_installed(json), Installed::Local("/home/u/.config/herdr/claude-deck-plugin".into()));
+    }
+
+    fn github() -> Installed {
+        Installed::GitHub { owner: "bigsan".into(), repo: "claude-deck".into(), commit: "1dea3ccfbbe9e77a49ae32f295e26d247609e8e9".into() }
+    }
+
+    #[test]
+    fn setup_leaves_a_github_install_alone_and_succeeds() {
+        let check = leave_alone(&github(), true).expect("a GitHub install is left alone");
+        assert_eq!(check, Ok("installed from GitHub bigsan/claude-deck@1dea3cc".to_string()));
+        let setup = leave_alone(&github(), false).expect("setup herdr writes and links nothing");
+        assert!(setup.as_ref().is_ok_and(|m| m.contains("herdr plugin update bigsan.claude-deck")), "{setup:?}");
+        assert_eq!(exit_code(&setup), 0);
+    }
+
+    #[test]
+    fn setup_refuses_an_unknown_source() {
+        for check in [true, false] {
+            let result = leave_alone(&Installed::Other("tarball".into()), check).expect("an unknown source is left alone");
+            assert!(result.as_ref().is_err_and(|m| m.contains("unknown source (tarball)")), "{result:?}");
+            assert_eq!(exit_code(&result), 1);
+        }
+    }
+
+    #[test]
+    fn setup_writes_and_links_when_not_installed_or_linked() {
+        assert_eq!(leave_alone(&Installed::None, false), None);
+        assert_eq!(leave_alone(&Installed::Local("/elsewhere".into()), false), None);
     }
 
     #[test]
