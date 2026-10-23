@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::text::Line;
 
 use crate::data::Session;
@@ -23,6 +23,11 @@ use crate::views::{ColumnsView, TabsView, TimelineView, View};
 const VIEWS: &str = "ABC";
 const VERSION: &str = concat!("claude-deck ", env!("CARGO_PKG_VERSION"));
 const POLL: Duration = Duration::from_millis(250);
+// Two clicks on the same cell this close together are a double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+// Normal mouse tracking (presses and the wheel, no motion) in SGR encoding, and off again.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
+const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
 // How often to look for changes: every second while something changes, backing
 // off to 2 s after 10 s of quiet and 5 s after 30 s. A scratchpad big enough that
 // one look is expensive is looked at no more often than BUDGET allows.
@@ -238,7 +243,8 @@ impl App {
             ("?", "close this"),
         ];
         let back: &[(&str, &str)] = if self.nested { &[("esc h", "back to all sessions")] } else { &[] };
-        for (key, what) in view.help().iter().chain([("", "")].iter()).chain(back.iter()).chain(common.iter()) {
+        let mouse: &[(&str, &str)] = if mouse_on() { &[("mouse", "wheel moves / scrolls · click picks · double-click opens")] } else { &[] };
+        for (key, what) in view.help().iter().chain([("", "")].iter()).chain(back.iter()).chain(common.iter()).chain(mouse.iter()) {
             lines.push(compose(cells, &[seg(format!("  {key}"), yellow(), 14), flex(*what, dim())], none()));
         }
         window(&lines, 0, height, cells)
@@ -317,6 +323,21 @@ impl App {
         Flow::Stay
     }
 
+    fn mouse(&mut self, m: Mouse) {
+        if self.ui.typing {
+            return;
+        }
+        if self.help_on {
+            // a click closes the keys, as any key does
+            self.help_on = matches!(m.press, Press::Wheel(_));
+            self.dirty = true;
+            return;
+        }
+        if self.views[self.view].mouse(&mut self.ui, &self.session, m) {
+            self.dirty = true;
+        }
+    }
+
     // -- loop
 
     fn rescan(&mut self) {
@@ -344,6 +365,7 @@ impl App {
 
     fn frame(&mut self, cells: usize, height: usize) -> Vec<Line<'static>> {
         self.ui.image_want = None;
+        self.ui.hits.clear();
         self.ui.view_name = self.views[self.view].name();
         if self.help_on {
             self.help_lines(cells, height)
@@ -372,15 +394,17 @@ pub struct Deck {
     view: String,
     help_on: bool,
     kitty: Kitty,
+    /// the last click, for telling a double-click
+    last_click: Option<(Instant, u16, u16)>,
 }
 
 impl Deck {
     pub fn sessions(home: Option<String>, view: &str) -> Deck {
-        Deck { overview: Some(Overview::new(home)), app: None, view: view.to_string(), help_on: false, kitty: Kitty::new() }
+        Deck { overview: Some(Overview::new(home)), app: None, view: view.to_string(), help_on: false, kitty: Kitty::new(), last_click: None }
     }
 
     pub fn session(app: App) -> Deck {
-        Deck { overview: None, view: app.view_letter(), app: Some(app), help_on: false, kitty: Kitty::new() }
+        Deck { overview: None, view: app.view_letter(), app: Some(app), help_on: false, kitty: Kitty::new(), last_click: None }
     }
 
     /// One line about the session, or the list of sessions, for a pipe instead of a terminal.
@@ -396,7 +420,8 @@ impl Deck {
 
     fn overview_help(&self, o: &Overview, cells: usize, height: usize) -> Vec<Line<'static>> {
         let mut lines = vec![rule(cells, "keys · all sessions", VERSION, dim())];
-        for (key, what) in o.help() {
+        let mouse: &[(&str, &str)] = if mouse_on() { &[("mouse", "wheel moves · click picks · double-click opens")] } else { &[] };
+        for (key, what) in o.help().iter().chain(mouse.iter()) {
             lines.push(compose(cells, &[seg(format!("  {key}"), yellow(), 14), flex(*what, dim())], none()));
         }
         lines.push(blank(cells));
@@ -444,6 +469,44 @@ impl Deck {
             return true;
         }
         match o.handle(key) {
+            crate::overview::Flow::Stay => true,
+            crate::overview::Flow::Quit => false,
+            crate::overview::Flow::Open(target) => {
+                let mut app = App::open(target, &self.view, true);
+                app.rescan();
+                self.app = Some(app);
+                true
+            }
+        }
+    }
+
+    /// A mouse event as the deck sees it: presses of the left button and wheel notches.
+    fn press(&mut self, m: MouseEvent) -> Option<Mouse> {
+        let press = match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let double = self.last_click.is_some_and(|(at, x, y)| at.elapsed() < DOUBLE_CLICK && (x, y) == (m.column, m.row));
+                self.last_click = if double { None } else { Some((Instant::now(), m.column, m.row)) };
+                if double { Press::Double } else { Press::Click }
+            }
+            MouseEventKind::ScrollDown => Press::Wheel(1),
+            MouseEventKind::ScrollUp => Press::Wheel(-1),
+            _ => return None,
+        };
+        Some(Mouse { press, x: m.column as usize, y: m.row as usize })
+    }
+
+    /// False to quit.
+    fn mouse(&mut self, m: Mouse) -> bool {
+        if let Some(app) = &mut self.app {
+            app.mouse(m);
+            return true;
+        }
+        let Some(o) = &mut self.overview else { return false };
+        if self.help_on {
+            self.help_on = matches!(m.press, Press::Wheel(_));
+            return true;
+        }
+        match o.mouse(m) {
             crate::overview::Flow::Stay => true,
             crate::overview::Flow::Quit => false,
             crate::overview::Flow::Open(target) => {
@@ -532,6 +595,15 @@ impl Deck {
                             dirty = true;
                         }
                     }
+                    Event::Mouse(m) => {
+                        if let Some(m) = self.press(m) {
+                            crate::log::write(crate::log::Level::Trace, format_args!("mouse {m:?}"));
+                            if !self.mouse(m) {
+                                return Ok(());
+                            }
+                            dirty = true;
+                        }
+                    }
                     Event::Resize(..) => {
                         // the resize clears the screen, and the image with it
                         self.kitty.force = true;
@@ -570,6 +642,11 @@ fn key_name(key: KeyEvent) -> Option<String> {
     })
 }
 
+/// MOUSE is not 0: the deck takes the mouse from the terminal.
+fn mouse_on() -> bool {
+    crate::config::get("MOUSE").trim() != "0"
+}
+
 /// Run the deck on the terminal until the user quits or the process is told to stop.
 pub fn run(mut deck: Deck) -> std::io::Result<()> {
     unsafe {
@@ -580,11 +657,21 @@ pub fn run(mut deck: Deck) -> std::io::Result<()> {
     crate::render::warm_up();
     let mut terminal = ratatui::init();
     deck.kitty.measure();
+    let mouse = mouse_on();
+    if mouse {
+        // a panic leaves through ratatui's hook, which does not know about the mouse
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            print!("{MOUSE_OFF}");
+            let _ = std::io::stdout().flush();
+            hook(info);
+        }));
+    }
     // no autowrap: a full last column must not scroll the screen
-    print!("\x1b[?7l");
+    print!("\x1b[?7l{}", if mouse { MOUSE_ON } else { "" });
     let _ = std::io::stdout().flush();
     let result = deck.run(&mut terminal);
-    print!("{}\x1b[?7h", deck.kitty.forget());
+    print!("{}\x1b[?7h{}", deck.kitty.forget(), if mouse { MOUSE_OFF } else { "" });
     let _ = std::io::stdout().flush();
     ratatui::restore();
     result

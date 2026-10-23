@@ -22,6 +22,15 @@ pub trait View {
     /// Select `key` (the item picked in another view) if this view lists it.
     fn adopt(&mut self, ui: &mut Ui, s: &Session, key: &str);
     fn selection<'a>(&mut self, ui: &mut Ui, s: &'a Session) -> Option<Item<'a>>;
+    /// True when the click or wheel was used; `ui.hits` says what is where.
+    fn mouse(&mut self, ui: &mut Ui, s: &Session, m: Mouse) -> bool;
+}
+
+/// Wheel notches as lines to scroll.
+const WHEEL_LINES: isize = 3;
+
+fn scrolled(scroll: usize, notches: isize) -> usize {
+    (scroll as isize + notches * WHEEL_LINES).max(0) as usize
 }
 
 const DOWN: &str = "\x1b[B";
@@ -135,10 +144,13 @@ impl View for TabsView {
             ("3 Calls", format!(" {}", s.calls.len()), if failed > 0 { format!(" ✗{failed}") } else { String::new() }, red()),
         ];
         let mut segs = Vec::new();
+        let mut x = 0;
         for (n, (title, count, mark, mark_style)) in tabs.into_iter().enumerate() {
             let bg = if n == self.tab { tab_bg() } else { none() };
             let title_style = if n == self.tab { bold().patch(bg) } else { none() };
             let (tw, cw, mw) = (width(title) + 1, width(&count), width(&mark) + 1);
+            ui.mark((x, 1, tw + cw + mw, 1), Region::Tab(n));
+            x += tw + cw + mw + 1;
             segs.push(seg(format!(" {title}"), title_style, tw));
             segs.push(seg(count, dim().patch(bg), cw));
             segs.push(seg(format!("{mark} "), mark_style.patch(bg), mw));
@@ -153,6 +165,7 @@ impl View for TabsView {
             let kind = ["file", "task", "call"][self.tab];
             lines.push(rule(cells, &format!("{kind} {}/{}", i + 1, items.len()), "n/p next · e failure · h/esc back", dim()));
             self.scroll = self.scroll.min((detail.len() + 1).saturating_sub(body));
+            ui.mark((0, lines.len(), cells, body.saturating_sub(1)), Region::Preview);
             lines.extend(window(&detail, self.scroll, body.saturating_sub(1), cells));
             if let Some(path) = image {
                 ui.want_image(path, (0, lines.len() + 1 - body.saturating_sub(1), cells, body.saturating_sub(2)));
@@ -178,12 +191,16 @@ impl View for TabsView {
                 let empty = if ui.query.is_empty() && !ui.failed_only { "  (nothing yet)" } else { "  (nothing matches)" };
                 rows = vec![plain(cells, empty, dim())];
             }
+            mark_rows(&mut ui.hits, 0, lines.len(), cells, self.tops[t], list_h, items.len());
             lines.extend(window(&rows, 0, list_h, cells));
             if list_h + 1 < body {
                 lines.push(rule(cells, "", "", dim()));
                 let (detail, image) = detail_of(ui, item, i, items.len(), cells, s, now);
                 let preview_h = body - 1 - list_h - 1;
-                lines.extend(window(&detail, 0, preview_h, cells));
+                // the wheel scrolls the preview; moving the cursor puts it back at the top
+                self.scroll = self.scroll.min(detail.len().saturating_sub(preview_h));
+                ui.mark((0, lines.len(), cells, preview_h), Region::Preview);
+                lines.extend(window(&detail, self.scroll, preview_h, cells));
                 if let Some(path) = image {
                     ui.want_image(path, (0, lines.len() + 1 - preview_h, cells, preview_h.saturating_sub(1)));
                 }
@@ -214,7 +231,10 @@ impl View for TabsView {
                 "n" => self.move_to(ui, &items, i + 1),
                 "p" | "N" => self.move_to(ui, &items, i - 1),
                 "e" if !items.is_empty() => self.move_to(ui, &items, next_failure(&items, i as usize, 1) as isize),
-                ESC | "q" | BS | "h" | LEFT => self.full = false,
+                ESC | "q" | BS | "h" | LEFT => {
+                    self.full = false;
+                    self.scroll = 0;
+                }
                 _ => return false,
             }
             return true;
@@ -253,6 +273,29 @@ impl View for TabsView {
         let items = self.items(ui, s);
         let i = self.current(ui, &items);
         items.get(i).copied()
+    }
+
+    fn mouse(&mut self, ui: &mut Ui, s: &Session, m: Mouse) -> bool {
+        let items = self.items(ui, s);
+        let i = self.current(ui, &items) as isize;
+        match (hit(&ui.hits, m.x, m.y), m.press) {
+            (Some(Region::Tab(n)), Press::Click | Press::Double) => {
+                self.tab = n;
+                self.full = false;
+                self.scroll = 0;
+            }
+            (Some(Region::Row(n)), Press::Click) => self.move_to(ui, &items, n as isize),
+            (Some(Region::Row(n)), Press::Double) => {
+                self.move_to(ui, &items, n as isize);
+                self.full = true;
+            }
+            (Some(Region::Preview), Press::Wheel(d)) => self.scroll = scrolled(self.scroll, d),
+            (_, Press::Wheel(d)) if self.full => self.scroll = scrolled(self.scroll, d),
+            // over the list, or anywhere else, the wheel moves the cursor
+            (_, Press::Wheel(d)) => self.move_to(ui, &items, i + d),
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -485,11 +528,15 @@ impl View for ColumnsView {
                 none(),
             ));
             let list_h = 3.max(body.saturating_sub(3) * 40 / 100);
+            ui.mark((0, 1, cells, 1), Region::Column(0));
+            ui.mark((0, 2, cells, 1 + list_h), Region::Column(1));
             lines.push(focus_rule(cells, &format!("{} · newest first", label.trim()), &ui.filter_label(), focus == 1));
             lines.extend(self.list_rows(&items, i, cells, list_h, now));
+            mark_rows(&mut ui.hits, 0, 3, cells, self.top, list_h, items.len());
             let (detail, image) = if item.is_some() { detail_of(ui, item, i, items.len(), cells, s, now) } else { (vec![plain(cells, "empty", dim())], None) };
             let detail_h = body.saturating_sub(2 + list_h + 1);
             let title = if items.is_empty() { "detail".to_string() } else { format!("detail {}/{}", i + 1, items.len()) };
+            ui.mark((0, lines.len(), cells, 1 + detail_h), Region::Column(2));
             lines.push(focus_rule(cells, &title, if focus == 2 { "j/k scroll" } else { "" }, focus == 2));
             self.scroll = self.scroll.min(detail.len().saturating_sub(detail_h));
             lines.extend(window(&detail, self.scroll, detail_h, cells));
@@ -535,6 +582,17 @@ impl View for ColumnsView {
                 })
                 .collect();
             titles[2] = format!("{}{}", if items.is_empty() { "detail".to_string() } else { format!("detail {}/{}", i + 1, items.len()) }, if self.zoom { " · zoomed" } else { "" });
+            // each column's box, then the rows inside it, which lie over the box
+            let mut x = 1;
+            for &col in &shown {
+                ui.mark((x, 1, widths[col], box_h + 2), Region::Column(col));
+                match col {
+                    0 => (0..SOURCES.len().min(box_h)).for_each(|n| ui.mark((x, 2 + n, widths[0], 1), Region::Source(n))),
+                    1 => mark_rows(&mut ui.hits, x, 2, widths[1], self.top, box_h, items.len()),
+                    _ => {}
+                }
+                x += widths[col] + 1;
+            }
             lines.extend(framed(&shown, &widths, &titles, &content, self.focus, box_h));
             if let Some(path) = image {
                 let left = 1 + shown.iter().filter(|&&c| c < 2).map(|&c| widths[c] + 1).sum::<usize>() + 1;
@@ -620,6 +678,40 @@ impl View for ColumnsView {
         let items = self.items_for(ui, s, self.sid());
         let i = self.selected(ui, &items);
         items.get(i).copied()
+    }
+
+    fn mouse(&mut self, ui: &mut Ui, s: &Session, m: Mouse) -> bool {
+        let items = self.items_for(ui, s, self.sid());
+        let i = self.selected(ui, &items) as isize;
+        let region = hit(&ui.hits, m.x, m.y);
+        let Press::Wheel(d) = m.press else {
+            match region {
+                Some(Region::Source(n)) => {
+                    self.source = n;
+                    self.scroll = 0;
+                    // a double-click goes on into the list, as enter does
+                    self.focus = if m.press == Press::Double { 1 } else { 0 };
+                }
+                Some(Region::Row(n)) => {
+                    self.move_to(ui, &items, n as isize);
+                    self.focus = if m.press == Press::Double { 2 } else { 1 };
+                }
+                Some(Region::Column(col)) => self.focus = col,
+                _ => return false,
+            }
+            return true;
+        };
+        // the wheel works on the column under it, focused or not
+        match region {
+            Some(Region::Source(_) | Region::Column(0)) => {
+                self.source = (self.source as isize + d).rem_euclid(SOURCES.len() as isize) as usize;
+                self.scroll = 0;
+            }
+            Some(Region::Row(_) | Region::Column(1)) => self.move_to(ui, &items, i + d),
+            Some(Region::Column(_)) => self.scroll = scrolled(self.scroll, d),
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -821,10 +913,14 @@ impl View for TimelineView {
         let items = self.items(ui, s);
         let i = self.selected(ui, &items);
         let mut chips = Vec::new();
+        let mut x = 0;
         for (n, name) in ["files", "tasks", "shell", "other calls"].iter().enumerate() {
             chips.push(seg(SHOW_KEYS[n], blue(), 1));
             chips.push(seg(format!(" {name}  "), if self.show[n] { none() } else { dim() }, width(name) + 3));
+            ui.mark((x, 1, width(name) + 2, 1), Region::Tab(n));
+            x += width(name) + 4;
         }
+        ui.mark((x, 1, 15, 1), Region::Tab(SHOW_KEYS.len()));
         chips.push(seg("x", blue(), 1));
         chips.push(seg(" failures only", if ui.failed_only { red() } else { dim() }, 14));
         chips.push(flex("", none()));
@@ -837,6 +933,7 @@ impl View for TimelineView {
             let (detail, image) = detail_of(ui, Some(item), n, calls.len(), cells, s, now);
             lines.push(rule(cells, "full view", "n/p command · e failure · h/esc back", dim()));
             self.scroll = self.scroll.min((detail.len() + 1).saturating_sub(body));
+            ui.mark((0, lines.len(), cells, body.saturating_sub(1)), Region::Preview);
             lines.extend(window(&detail, self.scroll, body.saturating_sub(1), cells));
             if let Some(path) = image {
                 ui.want_image(path, (0, lines.len() + 1 - body.saturating_sub(1), cells, body.saturating_sub(2)));
@@ -845,12 +942,15 @@ impl View for TimelineView {
             let right = format!("{} {} events", ui.filter_label(), items.len()).trim().to_string();
             lines.push(rule(cells, "live · newest first", &right, dim()));
             let mut display: Vec<Line<'static>> = Vec::new();
+            // the item each display line belongs to, for clicks
+            let mut owners: Vec<Option<usize>> = Vec::new();
             let (mut sel_first, mut sel_last) = (0, 0);
             let mut last_at: Option<f64> = None;
             for (n, item) in items.iter().enumerate() {
                 if let Some(last) = last_at {
                     if last - item.at() > 600.0 {
                         display.push(rule(cells, &format!("{} · {} min earlier", crate::text::hm(item.at()), ((last - item.at()) / 60.0) as i64), "", dim()));
+                        owners.push(None);
                     }
                 }
                 last_at = Some(item.at());
@@ -861,6 +961,7 @@ impl View for TimelineView {
                 if self.open.as_deref() == Some(item.key().as_str()) {
                     display.extend(self.expansion(s, *item, cells));
                 }
+                owners.resize(display.len(), Some(n));
                 if n == i {
                     sel_last = display.len() - 1;
                 }
@@ -874,6 +975,11 @@ impl View for TimelineView {
             self.top = self.top.min(display.len().saturating_sub(view_h));
             if display.is_empty() {
                 display.push(plain(cells, "  (nothing yet)", dim()));
+            }
+            for (r, owner) in owners.iter().skip(self.top).take(view_h).enumerate() {
+                if let Some(n) = owner {
+                    ui.mark((0, lines.len() + r, cells, 1), Region::Row(*n));
+                }
             }
             lines.extend(window(&display, self.top, view_h, cells));
         }
@@ -950,6 +1056,28 @@ impl View for TimelineView {
         let i = self.selected(ui, &items);
         items.get(i).copied()
     }
+
+    fn mouse(&mut self, ui: &mut Ui, s: &Session, m: Mouse) -> bool {
+        let items = self.items(ui, s);
+        let i = self.selected(ui, &items);
+        match (hit(&ui.hits, m.x, m.y), m.press) {
+            (_, Press::Wheel(d)) if self.full => self.scroll = scrolled(self.scroll, d),
+            (_, Press::Wheel(d)) => self.move_to(ui, &items, i as isize + d),
+            // a toggle takes single clicks: a quick second one is not a double-click here
+            (Some(Region::Tab(n)), Press::Click) if n < SHOW_KEYS.len() => self.show[n] = !self.show[n],
+            (Some(Region::Tab(_)), Press::Click) => ui.failed_only = !ui.failed_only,
+            (Some(Region::Row(n)), press) => {
+                self.move_to(ui, &items, n as isize);
+                // a double-click expands in place, as enter does
+                if let (Press::Double, Some(item)) = (press, items.get(n)) {
+                    let key = item.key();
+                    self.open = if self.open.as_deref() == Some(key.as_str()) { None } else { Some(key) };
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -971,6 +1099,99 @@ mod tests {
         assert!(b.scroll > 1000);
         b.handle(&mut ui, &s, "g");
         assert_eq!(b.scroll, 0);
+    }
+
+    fn with_files(ages: &[f64]) -> Session {
+        let mut s = Session::new(std::path::PathBuf::from("/nonexistent"), None);
+        let t = now();
+        for (n, age) in ages.iter().enumerate() {
+            let rel = format!("f{n}.txt");
+            s.files.push(crate::data::FileItem { path: std::path::PathBuf::from("/nonexistent").join(&rel), rel, size: 1, mtime: t - age, is_image: false });
+        }
+        s
+    }
+
+    fn click(x: usize, y: usize) -> Mouse {
+        Mouse { press: Press::Click, x, y }
+    }
+
+    fn selected_rel(v: &mut dyn View, ui: &mut Ui, s: &Session) -> String {
+        match v.selection(ui, s) {
+            Some(Item::File(f)) => f.rel.clone(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn a_click_in_tabs_picks_the_tab_and_the_row_under_it() {
+        let mut ui = Ui::new(String::new());
+        let s = with_files(&[100.0, 200.0, 300.0, 400.0, 500.0]);
+        let mut a = TabsView::new();
+        a.render(&mut ui, &s, 80, 24);
+        // " 1 Files 5 " starts the tab line
+        assert!(a.mouse(&mut ui, &s, click(3, 1)));
+        assert_eq!(a.tab, 0);
+        ui.hits.clear();
+        a.render(&mut ui, &s, 80, 24);
+        // header, tabs, rule, then the list
+        a.mouse(&mut ui, &s, click(10, 5));
+        assert_eq!(selected_rel(&mut a, &mut ui, &s), "f2.txt");
+        a.mouse(&mut ui, &s, Mouse { press: Press::Wheel(1), x: 10, y: 5 });
+        assert_eq!(selected_rel(&mut a, &mut ui, &s), "f3.txt");
+        assert!(!a.full);
+        a.mouse(&mut ui, &s, Mouse { press: Press::Double, x: 10, y: 3 });
+        assert_eq!((selected_rel(&mut a, &mut ui, &s).as_str(), a.full), ("f0.txt", true));
+        // below the last item there is no row to pick
+        assert!(!a.mouse(&mut ui, &s, click(10, 9)) || selected_rel(&mut a, &mut ui, &s) == "f0.txt");
+    }
+
+    #[test]
+    fn a_click_in_columns_focuses_the_column_and_picks_the_source() {
+        let mut ui = Ui::new(String::new());
+        let s = with_files(&[100.0, 200.0]);
+        let mut b = ColumnsView::new();
+        b.render(&mut ui, &s, 120, 30);
+        // header, top border, then the sources one per row, inside the left border
+        b.mouse(&mut ui, &s, click(5, 2));
+        assert_eq!((b.source, b.focus), (0, 0));
+        b.mouse(&mut ui, &s, click(110, 10));
+        assert_eq!(b.focus, 2);
+        ui.hits.clear();
+        b.render(&mut ui, &s, 120, 30);
+        b.mouse(&mut ui, &s, Mouse { press: Press::Double, x: 30, y: 3 });
+        assert_eq!((selected_rel(&mut b, &mut ui, &s).as_str(), b.focus), ("f1.txt", 2));
+        // the wheel over the sources changes the source without moving the focus
+        b.mouse(&mut ui, &s, Mouse { press: Press::Wheel(1), x: 5, y: 8 });
+        assert_eq!((b.source, b.focus), (1, 2));
+        // stacked: the source line, the list, the detail
+        ui.hits.clear();
+        b.render(&mut ui, &s, 80, 30);
+        b.mouse(&mut ui, &s, click(10, 1));
+        assert_eq!(b.focus, 0);
+    }
+
+    #[test]
+    fn a_click_in_the_timeline_skips_gaps_and_expansions() {
+        let mut ui = Ui::new(String::new());
+        // the third file comes after a gap of more than ten minutes, under a rule
+        let s = with_files(&[1.0, 2.0, 1000.0]);
+        let mut c = TimelineView::new();
+        c.render(&mut ui, &s, 80, 24);
+        c.mouse(&mut ui, &s, click(20, 6));
+        assert_eq!(selected_rel(&mut c, &mut ui, &s), "f2.txt");
+        assert!(!c.mouse(&mut ui, &s, click(20, 5)) || selected_rel(&mut c, &mut ui, &s) == "f2.txt");
+        c.mouse(&mut ui, &s, Mouse { press: Press::Double, x: 20, y: 3 });
+        assert_eq!(c.open.as_deref(), Some("file:f0.txt"));
+        // f0's expansion now sits between f0 and f1
+        ui.hits.clear();
+        c.render(&mut ui, &s, 80, 24);
+        c.mouse(&mut ui, &s, click(20, 4));
+        assert_eq!(selected_rel(&mut c, &mut ui, &s), "f0.txt");
+        c.mouse(&mut ui, &s, click(20, 5));
+        assert_eq!(selected_rel(&mut c, &mut ui, &s), "f1.txt");
+        // the chips toggle what is shown
+        c.mouse(&mut ui, &s, click(2, 1));
+        assert!(!c.show[0]);
     }
 
     #[test]

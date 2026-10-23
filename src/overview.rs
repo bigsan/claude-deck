@@ -160,6 +160,8 @@ pub struct Overview {
     pub typing: bool,
     /// the directory whose newest session gets the cursor at first
     home: Option<String>,
+    /// where the last frame put its rows, for clicks
+    hits: Vec<(Area, Region)>,
 }
 
 const HELP: &[(&str, &str)] = &[
@@ -194,6 +196,7 @@ impl Overview {
             query: String::new(),
             typing: false,
             home,
+            hits: Vec::new(),
         };
         o.sync();
         o
@@ -375,6 +378,8 @@ impl Overview {
             let empty = if !self.loaded { "  reading sessions…" } else if self.query.is_empty() { "  (no Claude Code session is running)" } else { "  (nothing matches)" };
             rows = vec![plain(cells, empty, dim())];
         }
+        self.hits.clear();
+        mark_rows(&mut self.hits, 0, lines.len(), cells, self.top, list_h, shown.len());
         lines.extend(window(&rows, 0, list_h, cells));
         if let Some(row) = selected.filter(|_| list_h + 1 < body) {
             lines.push(rule(cells, "", "", dim()));
@@ -421,20 +426,40 @@ impl Overview {
             "k" | "\x1b[A" => self.move_to(&shown, i - 1),
             "g" => self.move_to(&shown, 0),
             "G" => self.move_to(&shown, shown.len() as isize - 1),
-            "\r" | "\n" | "l" | "\x1b[C" => {
-                if let Some(&r) = shown.get(i as usize) {
-                    // back from the session, the cursor is still on it
-                    self.pinned = true;
-                    let live = &self.rows[r].live;
-                    return Flow::Open(Target { pid: Some(live.pid), ..live.target() });
-                }
-            }
+            "\r" | "\n" | "l" | "\x1b[C" => return self.open(&shown, i as usize),
             "/" => {
                 self.typing = true;
                 self.query.clear();
             }
             "\x1b" => self.query.clear(),
             " " => self.preview = !self.preview,
+            _ => {}
+        }
+        Flow::Stay
+    }
+
+    fn open(&mut self, shown: &[usize], i: usize) -> Flow {
+        let Some(&r) = shown.get(i) else { return Flow::Stay };
+        // back from the session, the cursor is still on it
+        self.pinned = true;
+        let live = &self.rows[r].live;
+        Flow::Open(Target { pid: Some(live.pid), ..live.target() })
+    }
+
+    /// A click picks a session, a double-click opens it, the wheel moves the cursor.
+    pub fn mouse(&mut self, m: Mouse) -> Flow {
+        if self.typing {
+            return Flow::Stay;
+        }
+        let shown = self.shown();
+        let i = self.current(&shown) as isize;
+        match (hit(&self.hits, m.x, m.y), m.press) {
+            (_, Press::Wheel(d)) => self.move_to(&shown, i + d),
+            (Some(Region::Row(n)), Press::Click) => self.move_to(&shown, n as isize),
+            (Some(Region::Row(n)), Press::Double) => {
+                self.move_to(&shown, n as isize);
+                return self.open(&shown, n);
+            }
             _ => {}
         }
         Flow::Stay

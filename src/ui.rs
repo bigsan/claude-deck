@@ -104,6 +104,53 @@ impl Item<'_> {
     }
 }
 
+// ------------------------------------------------------------------ mouse
+
+/// (col, row, cols, rows) on the screen.
+pub type Area = (usize, usize, usize, usize);
+
+/// What a click can land on, as the frame drew it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Region {
+    /// a tab or a toggle in the line under the header
+    Tab(usize),
+    /// the n-th item of the list
+    Row(usize),
+    /// a source in B's first column
+    Source(usize),
+    /// B's n-th column, borders and all
+    Column(usize),
+    /// a preview or detail that scrolls
+    Preview,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Press {
+    Click,
+    Double,
+    /// notches down, negative up
+    Wheel(isize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mouse {
+    pub press: Press,
+    pub x: usize,
+    pub y: usize,
+}
+
+/// The region at (x, y); a region marked later lies over the ones before it.
+pub fn hit(hits: &[(Area, Region)], x: usize, y: usize) -> Option<Region> {
+    hits.iter().rev().find(|((ax, ay, w, h), _)| (*ax..ax + w).contains(&x) && (*ay..ay + h).contains(&y)).map(|(_, r)| *r)
+}
+
+/// Mark one region per item row of a list drawn from `top` at screen row `y`.
+pub fn mark_rows(hits: &mut Vec<(Area, Region)>, x: usize, y: usize, cells: usize, top: usize, shown: usize, total: usize) {
+    for n in top..total.min(top + shown) {
+        hits.push(((x, y + n - top, cells, 1), Region::Row(n)));
+    }
+}
+
 // ------------------------------------------------------------------ shared state
 
 /// Toggled by `=`, `#` and `u`, shared by every view.
@@ -127,6 +174,8 @@ pub struct Ui {
     pub view_name: &'static str,
     /// (image path, (col, row, cols, rows)) the current frame wants shown
     pub image_want: Option<(PathBuf, (usize, usize, usize, usize))>,
+    /// where the current frame put what a click can land on
+    pub hits: Vec<(Area, Region)>,
     wrapped: HashMap<u64, Vec<Line<'static>>>,
     /// file previews as read, per file version: a frame does not read the file again
     texts: HashMap<(PathBuf, u64, u64), Option<std::rc::Rc<String>>>,
@@ -145,6 +194,7 @@ impl Ui {
             label,
             view_name: "",
             image_want: None,
+            hits: Vec::new(),
             wrapped: HashMap::new(),
             texts: HashMap::new(),
         }
@@ -182,6 +232,10 @@ impl Ui {
         if area.2 > 2 && area.3 > 2 {
             self.image_want = Some((path, area));
         }
+    }
+
+    pub fn mark(&mut self, area: Area, region: Region) {
+        self.hits.push((area, region));
     }
 
     pub fn mode_label(&self) -> String {
@@ -746,6 +800,18 @@ mod tests {
 
     fn visible(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn a_click_lands_on_the_region_marked_last() {
+        let mut hits = vec![((0, 0, 10, 10), Region::Column(1))];
+        mark_rows(&mut hits, 0, 2, 10, 5, 3, 7);
+        assert_eq!(hit(&hits, 4, 2), Some(Region::Row(5)));
+        assert_eq!(hit(&hits, 9, 3), Some(Region::Row(6)));
+        // past the last item: the column, not a row
+        assert_eq!(hit(&hits, 4, 4), Some(Region::Column(1)));
+        assert_eq!(hit(&hits, 10, 2), None);
+        assert_eq!(hit(&hits, 0, 10), None);
     }
 
     #[test]

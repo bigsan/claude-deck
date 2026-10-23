@@ -21,6 +21,7 @@ use crate::data::home;
 pub const KEYS: &[(&str, &str, &str)] = &[
     ("LOG_LEVEL", "warn", "off, error, warn, info, debug or trace"),
     ("LOG_FILE", "", "where the log goes; default ~/.local/state/claude-deck/claude-deck.log"),
+    ("MOUSE", "1", "1 lets the mouse scroll, click and double-click; 0 leaves it to the terminal, to drag-select text"),
     ("IMAGE_CACHE", "8", "images kept in the terminal, so going back to one does not send it again"),
     // herdr plugin
     ("OPEN_ON", "", "agent statuses that open the deck, comma-separated"),
