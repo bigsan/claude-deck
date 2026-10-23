@@ -158,6 +158,13 @@ fn parse_installed(json: &str) -> Installed {
     }
 }
 
+/// `owner/repo@commit`, short, leaving out what herdr's listing does not have.
+fn github_label(owner: &str, repo: &str, commit: &str) -> String {
+    let name = if owner.is_empty() || repo.is_empty() { "(repository not listed)".to_string() } else { format!("{owner}/{repo}") };
+    let short = &commit[..commit.len().min(7)];
+    if short.is_empty() { name } else { format!("{name}@{short}") }
+}
+
 /// The outcome of `setup herdr` when herdr has the plugin from somewhere it must not
 /// write over or link: nothing is written or linked then.
 fn leave_alone(installed: &Installed, check: bool) -> Option<Result<String, String>> {
@@ -165,17 +172,17 @@ fn leave_alone(installed: &Installed, check: bool) -> Option<Result<String, Stri
         // A GitHub install runs its own release binary and follows releases with
         // `herdr plugin update`; linking over it would need an uninstall, so leave it be.
         Installed::GitHub { owner, repo, commit } => {
-            let short = &commit[..commit.len().min(7)];
-            let from = format!("installed from GitHub {owner}/{repo}@{short}");
+            let from = format!("installed from GitHub {}", github_label(owner, repo, commit));
             Some(Ok(if check {
                 from
             } else {
                 format!("{from}\nherdr plugin update {PLUGIN_ID} follows new releases; to run this binary instead, herdr plugin uninstall {PLUGIN_ID} and run claude-deck setup herdr again")
             }))
         }
-        Installed::Other(kind) => Some(Err(format!(
-            "{PLUGIN_ID} is installed from an unknown source ({kind}); remove it with herdr before claude-deck setup herdr"
-        ))),
+        Installed::Other(kind) => {
+            let kind = if kind.is_empty() { "herdr lists no source kind".to_string() } else { kind.clone() };
+            Some(Err(format!("{PLUGIN_ID} is installed from an unknown source ({kind}); remove it with herdr before claude-deck setup herdr")))
+        }
         Installed::None | Installed::Local(_) => None,
     }
 }
@@ -325,6 +332,15 @@ mod tests {
             assert!(result.as_ref().is_err_and(|m| m.contains("unknown source (tarball)")), "{result:?}");
             assert_eq!(exit_code(&result), 1);
         }
+    }
+
+    #[test]
+    fn missing_source_fields_read_plainly() {
+        assert_eq!(github_label("bigsan", "claude-deck", ""), "bigsan/claude-deck");
+        assert_eq!(github_label("", "", "1dea3ccfbbe9"), "(repository not listed)@1dea3cc");
+        let json = r#"{"result":{"plugins":[{"plugin_id":"bigsan.claude-deck","plugin_root":"/p"}]}}"#;
+        let result = leave_alone(&parse_installed(json), true).expect("a plugin without a source is left alone");
+        assert!(result.as_ref().is_err_and(|m| m.contains("(herdr lists no source kind)")), "{result:?}");
     }
 
     #[test]
