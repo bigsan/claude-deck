@@ -784,10 +784,13 @@ mod tests {
         for (name, call) in verdict_calls() {
             let status = status_seg(&call);
             assert!(width(&status.text) < status.size.unwrap(), "{name}: {:?} fills its column", status.text);
-            let row = visible(&call_row(&call, 100, true, none()));
-            let after = &row[row.find(&status.text).unwrap() + status.text.len()..];
-            let verdict = verdict_seg(&call).text;
-            assert!(after.starts_with(' ') && after.trim_start().starts_with(&verdict), "{name}: {row:?}");
+            // Cut the row by column, after the 9-cell time: the pending spinner may
+            // turn between status_seg and call_row. Every status mark is one cell.
+            let row: Vec<char> = visible(&call_row(&call, 100, true, none())).chars().collect();
+            let cell: String = row[9..9 + STATUS].iter().collect();
+            let after: String = row[9 + STATUS..].iter().collect();
+            assert!(cell.ends_with(' ') && !cell.trim().is_empty(), "{name}: {cell:?}");
+            assert!(after.starts_with(&verdict_seg(&call).text), "{name}: {after:?}");
         }
     }
 
