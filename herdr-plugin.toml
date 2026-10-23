@@ -1,0 +1,95 @@
+# For `herdr plugin install bigsan/claude-deck`: the build step downloads this version's
+# release binary (scripts/fetch-release.sh). Generated from src/setup.rs; cargo test
+# checks it is current, and UPDATE_MANIFEST=1 cargo test rewrites it.
+#
+# Docks a Claude Code session beside its agent pane: the scratchpad's files as they
+# change, tasks/ (background shells and subagents), and every tool call with its
+# time, command, exit code and output, in three views (A tabs, B columns, C timeline).
+# The sessions action lists every running session.
+
+id = "bigsan.claude-deck"
+name = "Claude Deck"
+version = "0.2.0"
+min_herdr_version = "0.9.0"
+description = "A Claude Code session's scratchpad, tasks and tool calls beside it, and every running session in one list."
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["sh", "scripts/fetch-release.sh"]
+
+[[panes]]
+id = "deck"
+title = "Claude Deck"
+placement = "split"
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck"]
+
+[[panes]]
+id = "sessions"
+title = "Claude sessions"
+placement = "split"
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "event"]
+
+[[events]]
+on = "pane.closed"
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "event"]
+
+[[actions]]
+id = "toggle"
+title = "Claude deck: toggle"
+description = "Open the focused Claude session's deck beside it, or close it."
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "toggle"]
+
+[[actions]]
+id = "open-a"
+title = "Claude deck: open in tabs view (A)"
+description = "Open the deck in view A: Files / Tasks / Calls tabs with a preview."
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "open-a"]
+
+[[actions]]
+id = "open-b"
+title = "Claude deck: open in columns view (B)"
+description = "Open the deck in view B: sources, list and a live detail column."
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "open-b"]
+
+[[actions]]
+id = "open-c"
+title = "Claude deck: open in timeline view (C)"
+description = "Open the deck in view C: one stream of file changes, tasks and calls."
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "open-c"]
+
+[[actions]]
+id = "close"
+title = "Claude deck: close"
+description = "Close the deck for the focused agent pane."
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "close"]
+
+[[actions]]
+id = "sessions"
+title = "Claude deck: all sessions"
+description = "Open every running Claude Code session in one list beside the focused pane."
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "sessions"]
+
+[[actions]]
+id = "path"
+title = "Claude deck: print paths"
+description = "Print the session directory and transcript the deck would show."
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "path"]
+
+[[actions]]
+id = "reveal"
+title = "Claude deck: reveal folder"
+description = "Open the session directory in the file manager."
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/bin/claude-deck.sh\" \"$@\"", "claude-deck", "herdr", "reveal"]
+

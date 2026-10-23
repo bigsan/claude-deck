@@ -1,0 +1,7 @@
+{
+  "name": "session-deck-hooks",
+  "version": "0.1.0",
+  "description": "Logs every tool call's permission verdict to gate.jsonl in the session's temp directory, for the herdr Session Deck plugin to read. Observes only: never blocks, rewrites or delays a call.",
+  "author": { "name": "San Chen" },
+  "license": "MIT"
+}

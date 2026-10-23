@@ -1,0 +1,11 @@
+{
+  "name": "claude-deck",
+  "owner": { "name": "San Chen" },
+  "plugins": [
+    {
+      "name": "session-deck-hooks",
+      "source": "./claude-plugin",
+      "description": "Permission-verdict log for the herdr Session Deck"
+    }
+  ]
+}

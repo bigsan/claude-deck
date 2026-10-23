@@ -1,0 +1,29 @@
+[package]
+name = "claude-deck"
+version = "0.2.0"
+edition = "2024"
+description = "Watch Claude Code sessions: scratchpad files, tasks and every tool call, standalone or as a herdr plugin"
+license = "MIT"
+authors = ["San Chen"]
+repository = "https://github.com/bigsan/claude-deck"
+homepage = "https://github.com/bigsan/claude-deck"
+readme = "README.md"
+keywords = ["claude", "claude-code", "herdr", "tui", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["/src", "/claude-plugin", "/herdr-plugin.toml", "/config.example.env", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+
+[dependencies]
+ratatui = "0.30"
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-default-fancy"] }
+regex = "1"
+unicode-width = "0.2"
+base64 = "0.22"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

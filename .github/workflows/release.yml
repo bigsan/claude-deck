@@ -1,0 +1,85 @@
+# Builds the release binaries when a v<version> tag is pushed and attaches them, with
+# their .sha256, to a GitHub release. herdr-plugin.toml's build step and the Homebrew
+# formula download these by name: claude-deck-v<version>-<target>.tar.gz.
+#
+# Every target is built on a standard runner, which private repositories can use too:
+# x86_64 macOS is cross-compiled on the arm64 macOS runner, and each Linux target is a
+# static musl binary linked with rust-lld on a runner of its own architecture, so its
+# tests run natively. musl binaries do not depend on the system's glibc version.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag, Cargo.toml and herdr-plugin.toml agree on the version
+        run: |
+          tag=${GITHUB_REF_NAME#v}
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          plugin=$(sed -n 's/^version = "\(.*\)"$/\1/p' herdr-plugin.toml | head -n 1)
+          echo "tag $tag, Cargo.toml $crate, herdr-plugin.toml $plugin"
+          [ "$tag" = "$crate" ] && [ "$tag" = "$plugin" ]
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # test: the runner can execute the target's binaries.
+          - { target: aarch64-apple-darwin, os: macos-15, test: true }
+          - { target: x86_64-apple-darwin, os: macos-15 }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, musl: true, test: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, musl: true, test: true }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain, should the image lack one
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - run: rustup target add ${{ matrix.target }}
+      - name: Link musl with rust-lld
+        if: matrix.musl
+        run: |
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld" >> "$GITHUB_ENV"
+      - run: cargo test --locked --target ${{ matrix.target }}
+        if: matrix.test
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name=claude-deck-${GITHUB_REF_NAME}-${{ matrix.target }}
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/claude-deck LICENSE README.md "$name"/
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: claude-deck-*.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
