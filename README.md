@@ -20,6 +20,12 @@ JSON / JSONL / XML, `#` toggles line numbers, `u` unfolds long output. Previews 
 bat's syntaxes and theme (built in). Images are drawn with the Kitty graphics protocol, in Ghostty,
 kitty and WezTerm directly and inside herdr panes; tmux is not supported.
 
+The mouse works too: the wheel moves the cursor in a list and scrolls a preview or detail, a click
+picks a row, a tab (A), a column or source (B) or a toggle (C), and a double-click opens what
+`enter` would: a call full screen (A), the detail (B), the expansion (C), a session from the list.
+While the deck has the mouse, most terminals still drag-select text with Shift held (iTerm2:
+Option); `MOUSE=0` gives the mouse back to the terminal.
+
 After `/clear` Claude Code carries on in a new session; the deck notices within a few seconds and
 follows it.
 
@@ -101,6 +107,7 @@ It is also [in this repository](config.example.env).
 | --- | --- | --- |
 | `LOG_LEVEL` | `warn` | `off`, `error`, `warn`, `info`, `debug` or `trace` |
 | `LOG_FILE` | `~/.local/state/claude-deck/claude-deck.log` | rotated to `.log.1` past 5 MB |
+| `MOUSE` | `1` | `0` leaves the mouse to the terminal, for drag-selecting text |
 | `IMAGE_CACHE` | `8` | images kept in the terminal; a cached image is marked `cached` in the lists |
 
 Each log line names its thread, so `DECK_LOG_LEVEL=info` shows image files being read (and
