@@ -26,15 +26,9 @@ follows it.
 ## Install
 
 ```sh
-cargo install --path .                 # from a checkout of this repository
-```
-
-Not available yet: the Homebrew tap and the crates.io crate. Once they are published these
-will work too:
-
-```sh
-brew install bigsan/tap/claude-deck   # (not yet) macOS and Linux, from the release binaries
-cargo install claude-deck              # (not yet) build it from crates.io
+brew install bigsan/tap/claude-deck   # macOS and Linux, from the release binaries
+cargo install claude-deck              # build it from crates.io
+cargo install --path .                 # or from a checkout of this repository
 ```
 
 The [releases](https://github.com/bigsan/claude-deck/releases) also carry the binaries as
@@ -61,7 +55,7 @@ herdr plugin install bigsan/claude-deck   # downloads the release binary for thi
 The install step (`scripts/fetch-release.sh`, needs `curl`, `tar` and `shasum` or `sha256sum`)
 puts the binary in the plugin's own `bin/`; when it cannot, it uses a `claude-deck` already on
 `PATH` or in the Homebrew or cargo locations. `herdr plugin update` follows new releases. The
-plugin is listed in the [herdr marketplace](https://herdr.dev/plugins/) once the repository is public.
+plugin is listed in the [herdr marketplace](https://herdr.dev/plugins/).
 
 ```sh
 claude-deck setup herdr          # or: write a plugin that runs this binary and link it
