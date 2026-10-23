@@ -10,7 +10,7 @@ homepage = "https://github.com/bigsan/claude-deck"
 readme = "README.md"
 keywords = ["claude", "claude-code", "herdr", "tui", "terminal"]
 categories = ["command-line-utilities", "development-tools"]
-include = ["/src", "/claude-plugin", "/herdr-plugin.toml", "/config.example.env", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = ["/src", "/claude-plugin/.claude-plugin/plugin.json", "/claude-plugin/hooks/hooks.json", "/claude-plugin/hooks/gate-log.py","/herdr-plugin.toml", "/config.example.env", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
 ratatui = "0.30"
