@@ -23,6 +23,18 @@ kitty and WezTerm directly and inside herdr panes; tmux is not supported.
 After `/clear` Claude Code carries on in a new session; the deck notices within a few seconds and
 follows it.
 
+On made-up sessions: the list of sessions, then the three views.
+
+![Every running session, the one waiting for a permission answer first](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/sessions.png)
+
+![A tabs, Files: the scratchpad newest first, with a preview](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/view-a-files.png)
+
+![A tabs, Calls with x: failures only, a failed test's output below](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/view-a-failures.png)
+
+![B columns: sources, list and detail](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/view-b-columns.png)
+
+![C timeline: files, tasks and calls in one stream](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/view-c-timeline.png)
+
 ## Install
 
 ```sh
