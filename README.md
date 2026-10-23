@@ -59,11 +59,12 @@ plugin is listed in the [herdr marketplace](https://herdr.dev/plugins/).
 
 ```sh
 claude-deck setup herdr          # or: write a plugin that runs this binary and link it
-claude-deck setup herdr --check  # linked, stale (the binary moved) or unlinked
+claude-deck setup herdr --check  # linked, stale (the binary moved), unlinked, or installed from GitHub
 ```
 
 That plugin folder is `~/.config/herdr/claude-deck-plugin/`; its manifest runs the binary by
-absolute path, so run `setup herdr` again after moving it. Either way, bind a key in
+absolute path, so run `setup herdr` again after moving it. When the plugin is installed from
+GitHub, `setup herdr` leaves it alone and points to `herdr plugin update`. Either way, bind a key in
 `~/.config/herdr/config.toml`, then `herdr server reload-config`:
 
 ```toml
