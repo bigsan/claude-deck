@@ -551,28 +551,32 @@ pub fn next_failure(items: &[Item], start: usize, step: isize) -> usize {
 
 // ------------------------------------------------------------------ rows
 
+/// The status column: its longest text, "⊘ deny", plus a cell before the verdict or
+/// agent mark that follows it.
+const STATUS: usize = 7;
+
 pub fn status_seg(call: &Call) -> Seg {
     if call.pending() {
-        return seg(format!("{} run", spin()), yellow(), 6);
+        return seg(format!("{} run", spin()), yellow(), STATUS);
     }
     if call.verdict == Verdict::Reject {
-        return seg("⊘ no", red(), 6);
+        return seg("⊘ no", red(), STATUS);
     }
     if call.denied || call.verdict == Verdict::Deny {
-        return seg("⊘ deny", red(), 6);
+        return seg("⊘ deny", red(), STATUS);
     }
     if call.interrupted {
-        return seg("⌁ int", yellow(), 6);
+        return seg("⌁ int", yellow(), STATUS);
     }
     let failed = red().add_modifier(Modifier::BOLD);
     if call.family == Family::Shell {
         return match call.exit {
-            Some(0) => seg("✓", green(), 6),
-            Some(code) => seg(format!("✗ {code}"), failed, 6),
-            None => seg("✗", failed, 6),
+            Some(0) => seg("✓", green(), STATUS),
+            Some(code) => seg(format!("✗ {code}"), failed, STATUS),
+            None => seg("✗", failed, STATUS),
         };
     }
-    if call.is_error { seg("✗", failed, 6) } else { seg("✓", green(), 6) }
+    if call.is_error { seg("✗", failed, STATUS) } else { seg("✓", green(), STATUS) }
 }
 
 fn verdict_text(verdict: Verdict) -> Option<(&'static str, Style, &'static str)> {
@@ -820,6 +824,47 @@ mod tests {
         call.finish(2.0, "The user doesn't want to proceed with this tool use.", true, &json!({}));
         call.verdict = Verdict::Reject;
         assert_eq!(status_seg(&call).text, "⊘ no");
+    }
+
+    /// deny, reject, pending, auto and ask calls, each with its verdict.
+    fn verdict_calls() -> Vec<(&'static str, Call)> {
+        let call = |verdict: Verdict, finish: Option<(&str, bool)>| {
+            let mut call = Call::new("t1", "Bash", json!({ "command": "rm x" }), 1.0, None);
+            if let Some((output, error)) = finish {
+                call.finish(2.0, output, error, &json!({}));
+            }
+            call.verdict = verdict;
+            call
+        };
+        vec![
+            ("deny", call(Verdict::Deny, Some(("Permission to use Bash has been denied.", true)))),
+            ("reject", call(Verdict::Reject, Some(("The user doesn't want to proceed with this tool use.", true)))),
+            ("pending", call(Verdict::Wait, None)),
+            ("auto", call(Verdict::Auto, Some(("ok", false)))),
+            ("ask", call(Verdict::Ask, Some(("ok", false)))),
+        ]
+    }
+
+    #[test]
+    fn every_status_leaves_a_cell_before_the_verdict() {
+        for (name, call) in verdict_calls() {
+            let status = status_seg(&call);
+            assert!(width(&status.text) < status.size.unwrap(), "{name}: {:?} fills its column", status.text);
+            // Cut the row by column, after the 9-cell time: the pending spinner may
+            // turn between status_seg and call_row. Every status mark is one cell.
+            let row: Vec<char> = visible(&call_row(&call, 100, true, none())).chars().collect();
+            let cell: String = row[9..9 + STATUS].iter().collect();
+            let after: String = row[9 + STATUS..].iter().collect();
+            assert!(cell.ends_with(' ') && !cell.trim().is_empty(), "{name}: {cell:?}");
+            assert!(after.starts_with(&verdict_seg(&call).text), "{name}: {after:?}");
+        }
+    }
+
+    #[test]
+    fn a_denied_call_reads_deny_once_in_each_column() {
+        let (_, call) = verdict_calls().remove(0);
+        assert_eq!(status_seg(&call).text, "⊘ deny");
+        assert!(!visible(&call_row(&call, 100, true, none())).contains("denydeny"));
     }
 
     #[test]

@@ -29,6 +29,18 @@ Option); `MOUSE=0` gives the mouse back to the terminal.
 After `/clear` Claude Code carries on in a new session; the deck notices within a few seconds and
 follows it.
 
+On made-up sessions: the list of sessions, then the three views.
+
+![Every running session, the one waiting for a permission answer first](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/sessions.png)
+
+![A tabs, Files: the scratchpad newest first, with a preview](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/view-a-files.png)
+
+![A tabs, Calls with x: failures only, a failed test's output below](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/view-a-failures.png)
+
+![B columns: sources, list and detail](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/view-b-columns.png)
+
+![C timeline: files, tasks and calls in one stream](https://raw.githubusercontent.com/bigsan/claude-deck/main/docs/screenshots/view-c-timeline.png)
+
 ## Install
 
 ```sh
@@ -65,11 +77,12 @@ plugin is listed in the [herdr marketplace](https://herdr.dev/plugins/).
 
 ```sh
 claude-deck setup herdr          # or: write a plugin that runs this binary and link it
-claude-deck setup herdr --check  # linked, stale (the binary moved) or unlinked
+claude-deck setup herdr --check  # linked, stale (the binary moved), unlinked, or installed from GitHub
 ```
 
 That plugin folder is `~/.config/herdr/claude-deck-plugin/`; its manifest runs the binary by
-absolute path, so run `setup herdr` again after moving it. Either way, bind a key in
+absolute path, so run `setup herdr` again after moving it. When the plugin is installed from
+GitHub, `setup herdr` leaves it alone and points to `herdr plugin update`. Either way, bind a key in
 `~/.config/herdr/config.toml`, then `herdr server reload-config`:
 
 ```toml
