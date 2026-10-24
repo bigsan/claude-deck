@@ -320,7 +320,7 @@ impl View for TabsView {
                 self.scroll = top;
                 return true;
             }
-            BarUse::To(Scroll::List, top) => {
+            BarUse::To(Scroll::List | Scroll::Sources, top) => {
                 // the list shows from there, and the cursor comes along into view
                 self.tops[self.tab] = top;
                 self.move_to(ui, &items, into_view(i as usize, top, self.list_h) as isize);
@@ -467,11 +467,14 @@ pub struct ColumnsView {
     zoom: bool,
     /// rows of the list as last drawn
     list_h: usize,
+    /// the first source shown and the rows for them, as last drawn
+    src_top: usize,
+    src_h: usize,
 }
 
 impl ColumnsView {
     pub fn new() -> ColumnsView {
-        ColumnsView { source: 6, focus: 1, keys: Default::default(), index: Default::default(), following: Default::default(), top: 0, scroll: 0, zoom: false, list_h: 0 }
+        ColumnsView { source: 6, focus: 1, keys: Default::default(), index: Default::default(), following: Default::default(), top: 0, scroll: 0, zoom: false, list_h: 0, src_top: 0, src_h: 0 }
     }
 
     fn sid(&self) -> &'static str {
@@ -612,6 +615,10 @@ impl View for ColumnsView {
             let list_w = 36.max((inner - src_w) * 45 / 100);
             let widths = if self.zoom { [0, 0, inner] } else { [src_w, list_w, inner.saturating_sub(src_w + list_w)] };
             let box_h = body.saturating_sub(2);
+            // a short screen shows the sources around the one picked, beside a scrollbar
+            self.src_top = visible_top(self.source, self.src_top, box_h, SOURCES.len());
+            self.src_h = box_h;
+            let src_cells = beside_bar(src_w, SOURCES.len(), box_h);
             // each column's box first: the rows and scrollbars marked inside lie over it
             let mut xs = [0; 3];
             let mut x = 1;
@@ -619,7 +626,8 @@ impl View for ColumnsView {
                 xs[col] = x;
                 ui.mark((x, 1, widths[col], box_h + 2), Region::Column(col));
                 if col == 0 {
-                    (0..SOURCES.len().min(box_h)).for_each(|n| ui.mark((x, 2 + n, widths[0], 1), Region::Source(n)));
+                    let shown = self.src_top..SOURCES.len().min(self.src_top + box_h);
+                    shown.for_each(|n| ui.mark((x, 2 + n - self.src_top, src_cells, 1), Region::Source(n)));
                 }
                 x += widths[col] + 1;
             }
@@ -631,10 +639,11 @@ impl View for ColumnsView {
                     .enumerate()
                     .map(|(n, (other, text))| {
                         let bg = if n == self.source { selection(self.focus == 0) } else { none() };
-                        compose(src_w, &[flex(format!(" {text}"), if text.starts_with(' ') { none() } else { bold() }), self.badge(ui, s, other)], bg)
+                        compose(src_cells, &[flex(format!(" {text}"), if text.starts_with(' ') { none() } else { bold() }), self.badge(ui, s, other)], bg)
                     })
                     .collect();
-                content[0] = window(&src_rows, 0, box_h, src_w);
+                content[0] = window(&src_rows, self.src_top, box_h, src_cells);
+                add_bar(&mut ui.hits, &mut content[0], xs[0] + src_cells, 2, Scroll::Sources, SOURCES.len(), self.src_top);
                 titles[0] = "sources".into();
                 content[1] = self.list_rows(ui, &items, i, list_w, box_h, (xs[1], 2));
                 let filter = ui.filter_label();
@@ -755,6 +764,12 @@ impl View for ColumnsView {
                 self.move_to(ui, &items, into_view(i as usize, top, self.list_h) as isize);
                 return true;
             }
+            BarUse::To(Scroll::Sources, top) => {
+                self.src_top = top;
+                self.source = into_view(self.source, top, self.src_h);
+                self.scroll = 0;
+                return true;
+            }
         }
         let region = hit(&ui.hits, m.x, m.y);
         if matches!(m.press, Press::Drag | Press::Release) {
@@ -779,7 +794,7 @@ impl View for ColumnsView {
         };
         // the wheel works on the column under it, focused or not
         match region {
-            Some(Region::Source(_) | Region::Column(0)) => {
+            Some(Region::Source(_) | Region::Column(0) | Region::Bar(Bar { scrolls: Scroll::Sources, .. })) => {
                 self.source = (self.source as isize + d).rem_euclid(SOURCES.len() as isize) as usize;
                 self.scroll = 0;
             }
@@ -1188,7 +1203,7 @@ impl View for TimelineView {
                 self.scroll = top;
                 return true;
             }
-            BarUse::To(Scroll::List, top) => {
+            BarUse::To(Scroll::List | Scroll::Sources, top) => {
                 self.scroll_to(ui, &items, i, top);
                 return true;
             }
@@ -1533,6 +1548,40 @@ mod tests {
         ui.hits.clear();
         assert_full_width(&b.render(&mut ui, &s, 80, 30), 80);
         assert!(bars(&ui).iter().any(|b| b.scrolls == Scroll::List));
+    }
+
+    #[test]
+    fn on_a_short_screen_the_sources_follow_the_one_picked_beside_a_scrollbar() {
+        let mut ui = Ui::new(String::new());
+        let s = with_files(&ages(3));
+        let mut b = ColumnsView::new();
+        b.focus = 0;
+        // 12 rows: header, borders, footer leave 8 for the 11 sources
+        assert_full_width(&b.render(&mut ui, &s, 120, 12), 120);
+        let bar = bars(&ui).into_iter().find(|b| b.scrolls == Scroll::Sources).unwrap();
+        assert_eq!((bar.y, bar.view, bar.total), (2, 8, SOURCES.len()));
+        // the last source picked by key: the column scrolls to show it
+        b.handle(&mut ui, &s, "G");
+        ui.hits.clear();
+        let lines = b.render(&mut ui, &s, 120, 12);
+        assert_eq!(b.src_top, 3);
+        let last: String = lines[9].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(last.contains("denied"), "{last}");
+        // a click on the top row picks the fourth source, not the first
+        b.mouse(&mut ui, &s, click(5, 2));
+        assert_eq!(b.source, 3);
+        // the scrollbar's track: a page up brings the first sources back, the pick comes along
+        b.source = 10;
+        ui.hits.clear();
+        b.render(&mut ui, &s, 120, 12);
+        let x = ui.hits.iter().find(|(_, r)| matches!(r, Region::Bar(Bar { scrolls: Scroll::Sources, .. }))).unwrap().0.0;
+        b.mouse(&mut ui, &s, click(x, 2));
+        b.render(&mut ui, &s, 120, 12);
+        assert_eq!((b.src_top, b.source), (0, 7));
+        // tall enough: no scrollbar for them
+        ui.hits.clear();
+        b.render(&mut ui, &s, 120, 30);
+        assert!(!bars(&ui).iter().any(|b| b.scrolls == Scroll::Sources));
     }
 
     #[test]

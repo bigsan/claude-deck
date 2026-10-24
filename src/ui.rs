@@ -150,6 +150,8 @@ pub struct Mouse {
 pub enum Scroll {
     List,
     Text,
+    /// B's sources, which follow the source picked
+    Sources,
 }
 
 /// A scrollbar as drawn: `view` of `total` lines from `top`, in rows `y..y + view`.

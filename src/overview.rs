@@ -490,7 +490,7 @@ impl Overview {
                 self.scroll = top;
                 return Flow::Stay;
             }
-            BarUse::To(Scroll::List, top) => {
+            BarUse::To(Scroll::List | Scroll::Sources, top) => {
                 self.top = top;
                 self.move_to(&shown, i.clamp(top as isize, (top + self.list_h.max(1)) as isize - 1));
                 return Flow::Stay;
