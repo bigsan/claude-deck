@@ -495,8 +495,21 @@ impl Deck {
         Some(Mouse { press, x: m.column as usize, y: m.row as usize })
     }
 
+    /// A click now goes to the keys screen or the filter line, not to what is under it.
+    fn eats_clicks(&self) -> bool {
+        match (&self.app, &self.overview) {
+            (Some(app), _) => app.help_on || app.ui.typing,
+            (None, Some(o)) => self.help_on || o.typing,
+            _ => false,
+        }
+    }
+
     /// False to quit.
     fn mouse(&mut self, m: Mouse) -> bool {
+        if self.eats_clicks() {
+            // an eaten click does not start a double-click
+            self.last_click = None;
+        }
         if let Some(app) = &mut self.app {
             app.mouse(m);
             return true;
@@ -675,4 +688,32 @@ pub fn run(mut deck: Deck) -> std::io::Result<()> {
     let _ = std::io::stdout().flush();
     ratatui::restore();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn down(column: u16, row: u16) -> MouseEvent {
+        MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE }
+    }
+
+    fn deck() -> Deck {
+        Deck::session(App::new(PathBuf::from("/nonexistent"), None, None, "A"))
+    }
+
+    #[test]
+    fn a_click_that_closes_the_keys_does_not_start_a_double_click() {
+        let mut d = deck();
+        d.app.as_mut().unwrap().help_on = true;
+        let m = d.press(down(3, 4)).unwrap();
+        assert!(d.mouse(m));
+        assert!(!d.app.as_ref().unwrap().help_on);
+        assert_eq!(d.press(down(3, 4)).map(|m| m.press), Some(Press::Click));
+        // nor one ignored while typing a filter
+        d.app.as_mut().unwrap().ui.typing = true;
+        let m = d.press(down(3, 4)).unwrap();
+        d.mouse(m);
+        assert_eq!(d.press(down(3, 4)).map(|m| m.press), Some(Press::Click));
+    }
 }
