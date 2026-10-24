@@ -546,7 +546,7 @@ mod tests {
         o.preview = false;
         let lines = o.render(80, 24);
         let text: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!((crate::text::width(&text), text.ends_with('█')), (80, true));
+        assert_eq!((crate::text::width(&text), text.ends_with('▌')), (80, true));
         // the list is 21 rows from row 2: a page down from the track's end goes to the end
         o.mouse(Mouse { press: Press::Click, x: 79, y: 22 });
         o.render(80, 24);

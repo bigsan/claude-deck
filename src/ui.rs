@@ -201,12 +201,14 @@ pub fn scrollbar(total: usize, view: usize, top: usize) -> Option<Vec<Span<'stat
     Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
         .end_symbol(None)
-        .track_symbol(Some("│"))
-        .track_style(dim())
-        .thumb_symbol("█")
-        .thumb_style(none())
+        // only the thumb, half a cell wide and dim, as the tsk pane draws it; the track
+        // is left blank but still takes clicks
+        .track_symbol(None)
+        .thumb_symbol("▌")
+        .thumb_style(dim())
         .render(area, &mut buf, &mut state);
-    Some((0..area.height).map(|y| Span::styled(buf[(0, y)].symbol().to_string(), buf[(0, y)].style())).collect())
+    // where ratatui put the thumb, in plain dim without the buffer's explicit colour resets
+    Some((0..area.height).map(|y| if buf[(0, y)].symbol() == "▌" { Span::styled("▌", dim()) } else { Span::raw(" ") }).collect())
 }
 
 /// The width left for lines next to a scrollbar: one cell less when they do not fit.
@@ -942,7 +944,7 @@ mod tests {
     /// The thumb rows ratatui's Scrollbar draws.
     fn drawn_thumb(total: usize, view: usize, top: usize) -> Option<(usize, usize)> {
         let spans = scrollbar(total, view, top)?;
-        let rows: Vec<usize> = spans.iter().enumerate().filter(|(_, s)| s.content == "█").map(|(n, _)| n).collect();
+        let rows: Vec<usize> = spans.iter().enumerate().filter(|(_, s)| s.content == "▌").map(|(n, _)| n).collect();
         Some((rows[0], rows.len()))
     }
 
@@ -967,7 +969,8 @@ mod tests {
             }
         }
         let spans = scrollbar(40, 4, 0).unwrap();
-        assert_eq!(spans.iter().map(|s| s.content.as_ref()).collect::<String>(), "█│││");
+        assert_eq!(spans.iter().map(|s| s.content.as_ref()).collect::<String>(), "▌   ");
+        assert_eq!(spans[0].style, dim());
     }
 
     #[test]

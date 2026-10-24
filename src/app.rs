@@ -777,7 +777,7 @@ mod tests {
         let lines = app.frame(80, 10);
         assert_eq!(lines.len(), 10);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.ends_with('█'), "{text}");
+        assert!(text.ends_with('▌'), "{text}");
         // the wheel scrolls, a click on the track pages, a click elsewhere closes
         app.mouse(Mouse { press: Press::Wheel(1), x: 10, y: 5 });
         assert_eq!(app.help.top, 3);

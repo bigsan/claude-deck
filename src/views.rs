@@ -1472,8 +1472,8 @@ mod tests {
         // the list: eight rows from row 3, the bar in the last column
         let bar = bars(&ui)[0];
         assert_eq!((bar.scrolls, bar.y, bar.view, bar.total, bar.top), (Scroll::List, 3, 8, 40, 0));
-        assert_eq!(lines[3].spans.last().unwrap().content, "█");
-        assert_eq!(lines[10].spans.last().unwrap().content, "│");
+        assert_eq!(lines[3].spans.last().unwrap().content, "▌");
+        assert_eq!(lines[10].spans.last().unwrap().content, " ");
         // a click on the track below the thumb is a page down, not a click on the row beside it
         a.mouse(&mut ui, &s, click(79, 9));
         a.render(&mut ui, &s, 80, 24);
@@ -1527,7 +1527,7 @@ mod tests {
         let x = ui.hits.iter().find(|(_, r)| matches!(r, Region::Bar(_))).unwrap().0.0;
         let row: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
         let cells: Vec<char> = row.chars().collect();
-        assert_eq!((cells[x], cells[x + 1]), ('█', '┃'));
+        assert_eq!((cells[x], cells[x + 1]), ('▌', '┃'));
         // the wheel over the bar moves the list, a click on a row beside it still picks the row
         b.mouse(&mut ui, &s, Mouse { press: Press::Wheel(1), x, y: 10 });
         assert_eq!(selected_rel(&mut b, &mut ui, &s), "f1.txt");
