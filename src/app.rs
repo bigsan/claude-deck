@@ -467,7 +467,7 @@ impl Deck {
 
     fn overview_help(o: &Overview, cells: usize) -> Vec<Line<'static>> {
         let mut lines = vec![rule(cells, "keys · all sessions", VERSION, dim())];
-        let mouse: &[(&str, &str)] = if mouse_on() { &[("mouse", "wheel moves · click picks · double-click opens · scrollbar: click pages, drag")] } else { &[] };
+        let mouse: &[(&str, &str)] = if mouse_on() { &[("mouse", "wheel moves, or scrolls the preview under it · click picks · double-click opens · scrollbar: click pages, drag")] } else { &[] };
         for (key, what) in o.help().iter().chain(mouse.iter()) {
             lines.push(compose(cells, &[seg(format!("  {key}"), yellow(), 14), flex(*what, dim())], none()));
         }
