@@ -529,6 +529,8 @@ impl View for ColumnsView {
             ));
             let list_h = 3.max(body.saturating_sub(3) * 40 / 100);
             ui.mark((0, 1, cells, 1), Region::Column(0));
+            // one dot per source at the right end of the line
+            (0..dw).for_each(|n| ui.mark((cells.saturating_sub(dw) + n, 1, 1, 1), Region::Source(n)));
             ui.mark((0, 2, cells, 1 + list_h), Region::Column(1));
             lines.push(focus_rule(cells, &format!("{} · newest first", label.trim()), &ui.filter_label(), focus == 1));
             lines.extend(self.list_rows(&items, i, cells, list_h, now));
@@ -1187,6 +1189,12 @@ mod tests {
         b.render(&mut ui, &s, 80, 30);
         b.mouse(&mut ui, &s, click(10, 1));
         assert_eq!(b.focus, 0);
+        // the dots at the end of that line pick a source
+        b.mouse(&mut ui, &s, click(80 - SOURCES.len() + 2, 1));
+        assert_eq!((b.source, b.focus), (2, 0));
+        // and the dot drawn there is the one picked
+        let line: String = b.render(&mut ui, &s, 80, 30)[1].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(line.ends_with("··●········"), "{line}");
     }
 
     #[test]
