@@ -267,6 +267,8 @@ pub fn on_bar(drag: &mut Option<(Bar, usize)>, hits: &[(Area, Region)], m: Mouse
         }
         // a double-click on the track is two pages
         Press::Click | Press::Double => {
+            // a new press lets go of a thumb whose release never came
+            drag.take();
             let Some(Region::Bar(bar)) = hit(hits, m.x, m.y) else { return BarUse::No };
             let (start, len) = thumb(bar.total, bar.view, bar.top, bar.view);
             let row = m.y - bar.y;
@@ -1003,6 +1005,18 @@ mod tests {
         assert_eq!(on_bar(&mut drag, &hits, at(Press::Drag, 30)), BarUse::To(Scroll::Text, 30));
         assert_eq!(on_bar(&mut drag, &hits, at(Press::Release, 30)), BarUse::Held);
         assert_eq!(on_bar(&mut drag, &hits, at(Press::Drag, 6)), BarUse::No);
+    }
+
+    #[test]
+    fn a_press_elsewhere_lets_go_of_a_thumb_whose_release_was_lost() {
+        let bar = Bar { scrolls: Scroll::List, y: 5, total: 40, view: 10, top: 15 };
+        let hits = vec![((0, 5, 79, 10), Region::Column(1)), ((79, 5, 1, 10), Region::Bar(bar))];
+        let mut drag = None;
+        assert_eq!(on_bar(&mut drag, &hits, Mouse { press: Press::Click, x: 79, y: 10 }), BarUse::Held);
+        // no release; a press on a row, then a drag: the row is the view's, the drag nobody's
+        assert_eq!(on_bar(&mut drag, &hits, Mouse { press: Press::Click, x: 10, y: 7 }), BarUse::No);
+        assert!(drag.is_none());
+        assert_eq!(on_bar(&mut drag, &hits, Mouse { press: Press::Drag, x: 10, y: 12 }), BarUse::No);
     }
 
     #[test]

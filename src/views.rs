@@ -1503,6 +1503,23 @@ mod tests {
     }
 
     #[test]
+    fn a_lost_release_does_not_keep_the_thumb_for_the_next_drag() {
+        let mut ui = Ui::new(String::new());
+        let s = with_files(&ages(40));
+        let mut a = TabsView::new();
+        a.tab = 0;
+        a.render(&mut ui, &s, 80, 24);
+        // the thumb taken, its release lost
+        a.mouse(&mut ui, &s, click(79, 3));
+        assert!(ui.drag.is_some());
+        // a click on the third row picks it; dragging from there scrolls nothing
+        a.mouse(&mut ui, &s, click(10, 5));
+        a.mouse(&mut ui, &s, Mouse { press: Press::Drag, x: 10, y: 9 });
+        a.render(&mut ui, &s, 80, 24);
+        assert_eq!((selected_rel(&mut a, &mut ui, &s).as_str(), a.tops[0]), ("f2.txt", 0));
+    }
+
+    #[test]
     fn a_long_preview_scrolls_by_its_scrollbar() {
         let mut ui = Ui::new(String::new());
         let mut s = with_files(&ages(2));
