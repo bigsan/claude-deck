@@ -1096,7 +1096,7 @@ impl View for TimelineView {
             let (mut display, mut owners, mut sel_first, mut sel_last) = self.stream(s, &items, i, cells, now);
             if display.len() > view_h {
                 // one cell narrower, for the scrollbar
-                (display, owners, sel_first, sel_last) = self.stream(s, &items, i, cells - 1, now);
+                (display, owners, sel_first, sel_last) = self.stream(s, &items, i, cells.saturating_sub(1), now);
             }
             let w = beside_bar(cells, display.len(), view_h);
             if sel_first < self.top {

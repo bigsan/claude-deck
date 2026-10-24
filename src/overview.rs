@@ -408,7 +408,7 @@ impl Overview {
             let view = body - 1 - list_h - 1;
             let mut detail = self.detail(row, cells);
             if detail.len() > view {
-                detail = self.detail(row, cells - 1);
+                detail = self.detail(row, cells.saturating_sub(1));
             }
             self.hits.push(((0, lines.len(), cells, view), Region::Preview));
             let rows = text_rows(&mut self.hits, &detail, cells, view, &mut self.scroll, (0, lines.len()));
