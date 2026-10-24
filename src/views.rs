@@ -62,13 +62,15 @@ pub struct TabsView {
     tops: [usize; 3],
     full: bool,
     scroll: usize,
+    /// the item `scroll` belongs to: another item starts at the top
+    scrolled: Option<String>,
     preview: bool,
     family: usize,
 }
 
 impl TabsView {
     pub fn new() -> TabsView {
-        TabsView { tab: 2, keys: Default::default(), index: [0; 3], following: [true; 3], tops: [0; 3], full: false, scroll: 0, preview: true, family: 0 }
+        TabsView { tab: 2, keys: Default::default(), index: [0; 3], following: [true; 3], tops: [0; 3], full: false, scroll: 0, scrolled: None, preview: true, family: 0 }
     }
 
     fn items<'a>(&self, ui: &Ui, s: &'a Session) -> Vec<Item<'a>> {
@@ -160,6 +162,12 @@ impl View for TabsView {
         let mut lines = vec![ui.header(s, cells), compose(cells, &segs, none())];
         let body = height.saturating_sub(lines.len() + 1);
         let item = items.get(i).copied();
+        // another tab, or a new item followed at the top, not only move_to
+        let key = item.map(|x| x.key());
+        if key != self.scrolled {
+            self.scroll = 0;
+            self.scrolled = key;
+        }
         if self.full && item.is_some() {
             let (detail, image) = detail_of(ui, item, i, items.len(), cells, s, now);
             let kind = ["file", "task", "call"][self.tab];
@@ -1164,6 +1172,39 @@ mod tests {
         assert_eq!((selected_rel(&mut a, &mut ui, &s).as_str(), a.full), ("f0.txt", true));
         // below the last item there is no row to pick
         assert!(!a.mouse(&mut ui, &s, click(10, 9)) || selected_rel(&mut a, &mut ui, &s) == "f0.txt");
+    }
+
+    #[test]
+    fn the_preview_starts_at_the_top_for_another_item() {
+        let mut ui = Ui::new(String::new());
+        let mut s = with_files(&[100.0, 200.0]);
+        let long = std::env::temp_dir().join(format!("claude-deck-a-{}.txt", std::process::id()));
+        std::fs::write(&long, (0..200).map(|n| format!("line {n}\n")).collect::<String>()).unwrap();
+        s.files[0].path = long.clone();
+        let mut a = TabsView::new();
+        a.tab = 0;
+        a.render(&mut ui, &s, 80, 24);
+        let preview_y = (0..24).find(|&y| hit(&ui.hits, 5, y) == Some(Region::Preview)).unwrap();
+        a.mouse(&mut ui, &s, Mouse { press: Press::Wheel(2), x: 5, y: preview_y });
+        a.render(&mut ui, &s, 80, 24);
+        assert_eq!(a.scroll, 6);
+        // back from another tab, by key
+        a.handle(&mut ui, &s, "2");
+        a.render(&mut ui, &s, 80, 24);
+        a.handle(&mut ui, &s, "1");
+        a.render(&mut ui, &s, 80, 24);
+        assert_eq!(a.scroll, 0);
+        // a new file at the top, which the cursor follows
+        a.scroll = 6;
+        a.render(&mut ui, &s, 80, 24);
+        assert_eq!(a.scroll, 6);
+        let mut fresh = s.files[1].clone();
+        fresh.rel = "new.txt".into();
+        fresh.mtime = now();
+        s.files.insert(0, fresh);
+        a.render(&mut ui, &s, 80, 24);
+        assert_eq!((selected_rel(&mut a, &mut ui, &s).as_str(), a.scroll), ("new.txt", 0));
+        let _ = std::fs::remove_file(&long);
     }
 
     #[test]
