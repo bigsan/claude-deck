@@ -490,3 +490,32 @@ impl Overview {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn live(n: usize) -> Live {
+        Live { pid: 1000 + n as i32, session_id: format!("s{n}-0000"), cwd: format!("/p/{n}"), name: format!("session {n}"), busy: false, updated: 0.0, started: 0.0 }
+    }
+
+    #[test]
+    fn a_click_picks_a_session_and_a_double_click_opens_it() {
+        // render does not sync with the background reader, so these rows stay as set
+        let mut o = Overview::new(None);
+        o.rows = (0..4).map(|n| Row { live: live(n), stats: None }).collect();
+        o.loaded = true;
+        o.render(80, 30);
+        // header, rule, then one session per row
+        assert!(matches!(o.mouse(Mouse { press: Press::Click, x: 5, y: 4 }), Flow::Stay));
+        assert_eq!(o.key.as_deref(), Some("s2-0000"));
+        assert!(matches!(o.mouse(Mouse { press: Press::Wheel(1), x: 5, y: 20 }), Flow::Stay));
+        assert_eq!(o.key.as_deref(), Some("s3-0000"));
+        match o.mouse(Mouse { press: Press::Double, x: 5, y: 3 }) {
+            Flow::Open(target) => assert_eq!(target.pid, Some(1001)),
+            _ => panic!("a double-click opens the session"),
+        }
+        // below the last session there is nothing to open
+        assert!(matches!(o.mouse(Mouse { press: Press::Double, x: 5, y: 7 }), Flow::Stay));
+    }
+}

@@ -1176,7 +1176,8 @@ mod tests {
         a.mouse(&mut ui, &s, Mouse { press: Press::Double, x: 10, y: 3 });
         assert_eq!((selected_rel(&mut a, &mut ui, &s).as_str(), a.full), ("f0.txt", true));
         // below the last item there is no row to pick
-        assert!(!a.mouse(&mut ui, &s, click(10, 9)) || selected_rel(&mut a, &mut ui, &s) == "f0.txt");
+        assert!(!a.mouse(&mut ui, &s, click(10, 9)));
+        assert_eq!(selected_rel(&mut a, &mut ui, &s), "f0.txt");
     }
 
     #[test]
@@ -1252,7 +1253,9 @@ mod tests {
         c.render(&mut ui, &s, 80, 24);
         c.mouse(&mut ui, &s, click(20, 6));
         assert_eq!(selected_rel(&mut c, &mut ui, &s), "f2.txt");
-        assert!(!c.mouse(&mut ui, &s, click(20, 5)) || selected_rel(&mut c, &mut ui, &s) == "f2.txt");
+        // the rule over the gap is no item
+        assert!(!c.mouse(&mut ui, &s, click(20, 5)));
+        assert_eq!(selected_rel(&mut c, &mut ui, &s), "f2.txt");
         c.mouse(&mut ui, &s, Mouse { press: Press::Double, x: 20, y: 3 });
         assert_eq!(c.open.as_deref(), Some("file:f0.txt"));
         // f0's expansion now sits between f0 and f1

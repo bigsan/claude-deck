@@ -703,6 +703,22 @@ mod tests {
     }
 
     #[test]
+    fn a_second_click_on_the_same_cell_soon_after_is_a_double_click() {
+        let mut d = deck();
+        assert_eq!(d.press(down(3, 4)).map(|m| m.press), Some(Press::Click));
+        assert_eq!(d.press(down(3, 4)).map(|m| m.press), Some(Press::Double));
+        // a third starts over
+        assert_eq!(d.press(down(3, 4)).map(|m| m.press), Some(Press::Click));
+        // another cell
+        assert_eq!(d.press(down(4, 4)).map(|m| m.press), Some(Press::Click));
+        // too late
+        d.last_click = Instant::now().checked_sub(DOUBLE_CLICK + Duration::from_millis(50)).map(|at| (at, 4, 4));
+        assert_eq!(d.press(down(4, 4)).map(|m| m.press), Some(Press::Click));
+        let up = MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), ..down(4, 4) };
+        assert_eq!(d.press(up), None);
+    }
+
+    #[test]
     fn a_click_that_closes_the_keys_does_not_start_a_double_click() {
         let mut d = deck();
         d.app.as_mut().unwrap().help_on = true;
