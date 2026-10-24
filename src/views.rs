@@ -929,10 +929,15 @@ impl View for TimelineView {
         for (n, name) in ["files", "tasks", "shell", "other calls"].iter().enumerate() {
             chips.push(seg(SHOW_KEYS[n], blue(), 1));
             chips.push(seg(format!(" {name}  "), if self.show[n] { none() } else { dim() }, width(name) + 3));
-            ui.mark((x, 1, width(name) + 2, 1), Region::Tab(n));
+            // full screen the keys leave these alone, and so do clicks
+            if !self.full {
+                ui.mark((x, 1, width(name) + 2, 1), Region::Tab(n));
+            }
             x += width(name) + 4;
         }
-        ui.mark((x, 1, 15, 1), Region::Tab(SHOW_KEYS.len()));
+        if !self.full {
+            ui.mark((x, 1, 15, 1), Region::Tab(SHOW_KEYS.len()));
+        }
         chips.push(seg("x", blue(), 1));
         chips.push(seg(" failures only", if ui.failed_only { red() } else { dim() }, 14));
         chips.push(flex("", none()));
@@ -1260,6 +1265,13 @@ mod tests {
         // the chips toggle what is shown
         c.mouse(&mut ui, &s, click(2, 1));
         assert!(!c.show[0]);
+        // but not full screen, where f t s c x do nothing either
+        c.show[0] = true;
+        c.full = true;
+        ui.hits.clear();
+        c.render(&mut ui, &s, 80, 24);
+        assert!(!c.mouse(&mut ui, &s, click(10, 1)));
+        assert!(c.show[1]);
     }
 
     #[test]
