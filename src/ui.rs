@@ -252,10 +252,20 @@ pub enum BarUse {
 
 /// A click on the track pages, a press on the thumb takes it, and a drag moves it; `drag`
 /// keeps the scrollbar held and how far down the thumb it was taken.
+///
+/// A drag goes by the scrollbar of that kind as last drawn, not as it was when taken: the list
+/// may have grown, or the screen changed size, since.
 pub fn on_bar(drag: &mut Option<(Bar, usize)>, hits: &[(Area, Region)], m: Mouse) -> BarUse {
     match m.press {
         Press::Drag => match drag {
-            Some((bar, grab)) => BarUse::To(bar.scrolls, bar.top_at(m.y.saturating_sub(bar.y + *grab))),
+            Some((held, grab)) => {
+                let now = hits.iter().rev().find_map(|(_, r)| match r {
+                    Region::Bar(b) if b.scrolls == held.scrolls => Some(*b),
+                    _ => None,
+                });
+                let bar = now.unwrap_or(*held);
+                BarUse::To(bar.scrolls, bar.top_at(m.y.saturating_sub(bar.y + *grab)))
+            }
             None => BarUse::No,
         },
         Press::Release => {
@@ -1005,6 +1015,19 @@ mod tests {
         assert_eq!(on_bar(&mut drag, &hits, at(Press::Drag, 30)), BarUse::To(Scroll::Text, 30));
         assert_eq!(on_bar(&mut drag, &hits, at(Press::Release, 30)), BarUse::Held);
         assert_eq!(on_bar(&mut drag, &hits, at(Press::Drag, 6)), BarUse::No);
+    }
+
+    #[test]
+    fn a_drag_follows_the_scrollbar_as_last_drawn() {
+        let bar = Bar { scrolls: Scroll::List, y: 5, total: 40, view: 10, top: 0 };
+        let mut drag = None;
+        on_bar(&mut drag, &[((79, 5, 1, 10), Region::Bar(bar))], Mouse { press: Press::Click, x: 79, y: 5 });
+        // meanwhile the list grew to 80 and the screen got taller
+        let grown = Bar { total: 80, view: 20, y: 3, ..bar };
+        let hits = vec![((79, 3, 1, 20), Region::Bar(grown)), ((79, 30, 1, 5), Region::Bar(Bar { scrolls: Scroll::Text, ..bar }))];
+        assert_eq!(on_bar(&mut drag, &hits, Mouse { press: Press::Drag, x: 79, y: 40 }), BarUse::To(Scroll::List, 60));
+        // gone from the screen: the one taken
+        assert_eq!(on_bar(&mut drag, &[], Mouse { press: Press::Drag, x: 79, y: 40 }), BarUse::To(Scroll::List, 30));
     }
 
     #[test]
