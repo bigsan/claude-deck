@@ -742,13 +742,15 @@ pub struct TimelineView {
     full: bool,
     scroll: usize,
     top: usize,
+    /// the item the last click picked, and whether it was expanded before that click
+    clicked: Option<(String, bool)>,
 }
 
 const SHOW_KEYS: [&str; 4] = ["f", "t", "s", "c"];
 
 impl TimelineView {
     pub fn new() -> TimelineView {
-        TimelineView { show: [true, true, true, false], key: None, index: 0, open: None, following: true, full: false, scroll: 0, top: 0 }
+        TimelineView { show: [true, true, true, false], key: None, index: 0, open: None, following: true, full: false, scroll: 0, top: 0, clicked: None }
     }
 
     fn items<'a>(&self, ui: &Ui, s: &'a Session) -> Vec<Item<'a>> {
@@ -1060,19 +1062,36 @@ impl View for TimelineView {
     fn mouse(&mut self, ui: &mut Ui, s: &Session, m: Mouse) -> bool {
         let items = self.items(ui, s);
         let i = self.selected(ui, &items);
-        match (hit(&ui.hits, m.x, m.y), m.press) {
+        let clicked = self.clicked.take();
+        let region = hit(&ui.hits, m.x, m.y);
+        match (region, m.press) {
             (_, Press::Wheel(d)) if self.full => self.scroll = scrolled(self.scroll, d),
             (_, Press::Wheel(d)) => self.move_to(ui, &items, i as isize + d),
             // a toggle takes single clicks: a quick second one is not a double-click here
             (Some(Region::Tab(n)), Press::Click) if n < SHOW_KEYS.len() => self.show[n] = !self.show[n],
             (Some(Region::Tab(_)), Press::Click) => ui.failed_only = !ui.failed_only,
-            (Some(Region::Row(n)), press) => {
+            (Some(Region::Row(n)), Press::Click) => {
+                let Some(item) = items.get(n) else { return false };
+                let key = item.key();
+                self.clicked = Some((key.clone(), self.open.as_deref() == Some(key.as_str())));
+                // an expansion elsewhere follows the cursor here
                 self.move_to(ui, &items, n as isize);
-                // a double-click expands in place, as enter does
-                if let (Press::Double, Some(item)) = (press, items.get(n)) {
-                    let key = item.key();
-                    self.open = if self.open.as_deref() == Some(key.as_str()) { None } else { Some(key) };
-                }
+            }
+            (_, Press::Double) => {
+                // A double-click expands in place, as enter does, the item the first click
+                // picked: the rows may have moved under the second, and the first click has
+                // already brought an expansion along. It collapses only what was open before.
+                let (key, was_open) = match (clicked, region) {
+                    (Some(c), _) => c,
+                    (None, Some(Region::Row(n))) => match items.get(n) {
+                        Some(item) => (item.key(), self.open.as_deref() == Some(item.key().as_str())),
+                        None => return false,
+                    },
+                    _ => return false,
+                };
+                let Some(n) = items.iter().position(|x| x.key() == key) else { return false };
+                self.move_to(ui, &items, n as isize);
+                self.open = if was_open { None } else { Some(key) };
             }
             _ => return false,
         }
@@ -1192,6 +1211,37 @@ mod tests {
         // the chips toggle what is shown
         c.mouse(&mut ui, &s, click(2, 1));
         assert!(!c.show[0]);
+    }
+
+    #[test]
+    fn a_double_click_in_the_timeline_expands_what_the_first_click_picked() {
+        let mut ui = Ui::new(String::new());
+        let mut s = with_files(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        // f0 expands to eight lines, f2 (missing) to one
+        let long = std::env::temp_dir().join(format!("claude-deck-c-{}.txt", std::process::id()));
+        std::fs::write(&long, "1\n2\n3\n4\n5\n6\n7\n8\n").unwrap();
+        s.files[0].path = long.clone();
+        let mut c = TimelineView::new();
+        c.open = Some("file:f0.txt".into());
+        c.following = false;
+        c.render(&mut ui, &s, 80, 30);
+        let row_of = |ui: &Ui, n: usize| (0..30).find(|&y| hit(&ui.hits, 20, y) == Some(Region::Row(n))).unwrap();
+        let y2 = row_of(&ui, 2);
+        // the first click moves the expansion to f2, which moves f2 up past f0's long
+        // expansion; the second lands on the old place, now on another item
+        c.mouse(&mut ui, &s, click(20, y2));
+        assert_eq!(c.open.as_deref(), Some("file:f2.txt"));
+        ui.hits.clear();
+        c.render(&mut ui, &s, 80, 30);
+        assert!(!matches!(hit(&ui.hits, 20, y2), Some(Region::Row(2))));
+        c.mouse(&mut ui, &s, Mouse { press: Press::Double, x: 20, y: y2 });
+        let _ = std::fs::remove_file(&long);
+        assert_eq!((selected_rel(&mut c, &mut ui, &s).as_str(), c.open.as_deref()), ("f2.txt", Some("file:f2.txt")));
+        // a double-click on the expanded item collapses it
+        let y = row_of(&ui, 2);
+        c.mouse(&mut ui, &s, click(20, y));
+        c.mouse(&mut ui, &s, Mouse { press: Press::Double, x: 20, y });
+        assert_eq!(c.open, None);
     }
 
     #[test]
