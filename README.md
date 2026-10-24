@@ -23,7 +23,8 @@ kitty and WezTerm directly and inside herdr panes; tmux is not supported.
 The mouse works too: the wheel moves the cursor in a list and scrolls a preview or detail, a click
 picks a row, a tab (A), a column or source (B) or a toggle (C), and a double-click does what
 `enter` does: opens the file, task or call full screen (A), moves into the detail (B), expands in
-place (C), opens a session from the list.
+place (C), opens a session from the list. Lists, previews, details and the keys screen show a
+scrollbar when they do not fit; a click on its track pages, and its thumb drags.
 While the deck has the mouse, most terminals still drag-select text with Shift held (iTerm2:
 Option); `MOUSE=0` gives the mouse back to the terminal.
 
