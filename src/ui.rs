@@ -227,6 +227,16 @@ pub fn add_bar(hits: &mut Vec<(Area, Region)>, lines: &mut [Line<'static>], x: u
     hits.push(((x, y, 1, view), Region::Bar(Bar { scrolls, y, total, view, top })));
 }
 
+/// `view` rows of `text` from `scroll` (clamped to the end) at column `x`, row `y`, with a
+/// scrollbar when it does not fit; `text` is laid out one cell narrower then.
+pub fn text_rows(hits: &mut Vec<(Area, Region)>, text: &[Line<'static>], cells: usize, view: usize, scroll: &mut usize, (x, y): (usize, usize)) -> Vec<Line<'static>> {
+    let w = beside_bar(cells, text.len(), view);
+    *scroll = (*scroll).min(text.len().saturating_sub(view));
+    let mut rows = window(text, *scroll, view, w);
+    add_bar(hits, &mut rows, x + w, y, Scroll::Text, text.len(), *scroll);
+    rows
+}
+
 /// What a press does to a scrollbar.
 #[derive(Debug, PartialEq)]
 pub enum BarUse {

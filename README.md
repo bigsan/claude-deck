@@ -2,7 +2,7 @@
 
 A terminal viewer for Claude Code sessions, standalone or as a herdr plugin:
 
-- **All sessions**: every running Claude Code session in one list, with its name, project, busy or idle, last activity, calls, failures, and asks still waiting for a permission answer. Sessions waiting for you come first, then busy ones. `enter` opens one, `esc` comes back.
+- **All sessions**: every running Claude Code session in one list, with its name, project, busy or idle, last activity, calls, failures, and asks still waiting for a permission answer. Sessions waiting for you come first, then busy ones. `enter` opens one, `esc` comes back, `PgUp`/`PgDn` scroll its preview.
 - **One session**, in three views of the same data:
   - **Files**: the scratchpad (and `images/`) newest first, `●` on anything written in the last 30 s, with a text or image preview.
   - **Tasks**: background shells (`tasks/b*.output` named by a call's `backgroundTaskId`, exit code from the last line) and subagents (`a*.output`, a symlink to the subagent's transcript). Claude Code also gives every foreground command a `b*.output` while it runs and deletes it afterwards; those are shown as the running call's live output in Calls, not as tasks.

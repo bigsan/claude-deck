@@ -166,6 +166,9 @@ pub struct Overview {
     drag: Option<(Bar, usize)>,
     /// rows of the list as last drawn
     list_h: usize,
+    /// how far the preview is scrolled, and the session it belongs to
+    scroll: usize,
+    scrolled: Option<String>,
 }
 
 const HELP: &[(&str, &str)] = &[
@@ -174,6 +177,7 @@ const HELP: &[(&str, &str)] = &[
     ("g G", "first / last"),
     ("/", "filter by name or folder"),
     ("space", "preview on / off"),
+    ("PgUp PgDn", "scroll the preview"),
     ("esc", "clear the filter"),
     ("q", "quit"),
     ("?", "close this"),
@@ -203,6 +207,8 @@ impl Overview {
             hits: Vec::new(),
             drag: None,
             list_h: 0,
+            scroll: 0,
+            scrolled: None,
         };
         o.sync();
         o
@@ -391,10 +397,22 @@ impl Overview {
         let mut rows = window(&rows, 0, list_h, w);
         add_bar(&mut self.hits, &mut rows, w, lines.len(), Scroll::List, shown.len(), self.top);
         lines.extend(rows);
+        // another session's preview starts at the top
+        let key = selected.map(|r| r.live.session_id.clone());
+        if key != self.scrolled {
+            self.scroll = 0;
+            self.scrolled = key;
+        }
         if let Some(row) = selected.filter(|_| list_h + 1 < body) {
             lines.push(rule(cells, "", "", dim()));
-            let detail = self.detail(row, cells);
-            lines.extend(window(&detail, 0, body - 1 - list_h - 1, cells));
+            let view = body - 1 - list_h - 1;
+            let mut detail = self.detail(row, cells);
+            if detail.len() > view {
+                detail = self.detail(row, cells - 1);
+            }
+            self.hits.push(((0, lines.len(), cells, view), Region::Preview));
+            let rows = text_rows(&mut self.hits, &detail, cells, view, &mut self.scroll, (0, lines.len()));
+            lines.extend(rows);
         }
         lines.truncate(height.saturating_sub(1));
         while lines.len() < height.saturating_sub(1) {
@@ -443,6 +461,8 @@ impl Overview {
             }
             "\x1b" => self.query.clear(),
             " " => self.preview = !self.preview,
+            "\x1b[6~" => self.scroll += 10,
+            "\x1b[5~" => self.scroll = self.scroll.saturating_sub(10),
             _ => {}
         }
         Flow::Stay
@@ -465,7 +485,11 @@ impl Overview {
         let i = self.current(&shown) as isize;
         match on_bar(&mut self.drag, &self.hits, m) {
             BarUse::No => {}
-            BarUse::Held | BarUse::To(Scroll::Text, _) => return Flow::Stay,
+            BarUse::Held => return Flow::Stay,
+            BarUse::To(Scroll::Text, top) => {
+                self.scroll = top;
+                return Flow::Stay;
+            }
             BarUse::To(Scroll::List, top) => {
                 self.top = top;
                 self.move_to(&shown, i.clamp(top as isize, (top + self.list_h.max(1)) as isize - 1));
@@ -473,6 +497,9 @@ impl Overview {
             }
         }
         match (hit(&self.hits, m.x, m.y), m.press) {
+            (Some(Region::Preview | Region::Bar(Bar { scrolls: Scroll::Text, .. })), Press::Wheel(d)) => {
+                self.scroll = (self.scroll as isize + d * 3).max(0) as usize;
+            }
             (_, Press::Wheel(d)) => self.move_to(&shown, i + d),
             (Some(Region::Row(n)), Press::Click) => self.move_to(&shown, n as isize),
             (Some(Region::Row(n)), Press::Double) => {
@@ -528,7 +555,7 @@ mod tests {
         // header, rule, then one session per row
         assert!(matches!(o.mouse(Mouse { press: Press::Click, x: 5, y: 4 }), Flow::Stay));
         assert_eq!(o.key.as_deref(), Some("s2-0000"));
-        assert!(matches!(o.mouse(Mouse { press: Press::Wheel(1), x: 5, y: 20 }), Flow::Stay));
+        assert!(matches!(o.mouse(Mouse { press: Press::Wheel(1), x: 5, y: 3 }), Flow::Stay));
         assert_eq!(o.key.as_deref(), Some("s3-0000"));
         match o.mouse(Mouse { press: Press::Double, x: 5, y: 3 }) {
             Flow::Open(target) => assert_eq!(target.pid, Some(1001)),
@@ -536,6 +563,37 @@ mod tests {
         }
         // below the last session there is nothing to open
         assert!(matches!(o.mouse(Mouse { press: Press::Double, x: 5, y: 7 }), Flow::Stay));
+    }
+
+    #[test]
+    fn the_preview_scrolls_by_wheel_page_keys_and_scrollbar() {
+        let mut o = Overview::new(None);
+        let calls: Vec<Call> = (0..30).map(|n| Call::new(&format!("t{n}"), "Bash", serde_json::json!({ "command": format!("echo {n}") }), n as f64, None)).collect();
+        o.rows = (0..4).map(|n| Row { live: live(n), stats: Some(Stats { calls: 30, recent: calls.clone(), ..Default::default() }) }).collect();
+        o.loaded = true;
+        let lines = o.render(80, 24);
+        // the list takes the four sessions, the preview the 16 rows under its rule
+        let bar = o.hits.iter().find_map(|(_, r)| if let Region::Bar(b) = r { Some(*b) } else { None }).unwrap();
+        assert_eq!((bar.scrolls, bar.y, bar.view), (Scroll::Text, 7, 16));
+        for line in &lines {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(crate::text::width(&text), 80, "{text}");
+        }
+        o.mouse(Mouse { press: Press::Wheel(1), x: 10, y: 12 });
+        assert_eq!(o.scroll, 3);
+        o.handle("\x1b[6~");
+        o.render(80, 24);
+        assert_eq!(o.scroll, 13);
+        // the wheel over the list still moves the cursor, and another session starts at the top
+        o.mouse(Mouse { press: Press::Wheel(1), x: 10, y: 3 });
+        o.render(80, 24);
+        assert_eq!((o.key.as_deref(), o.scroll), (Some("s1-0000"), 0));
+        // a click on the track pages
+        o.mouse(Mouse { press: Press::Click, x: 79, y: 22 });
+        o.render(80, 24);
+        assert_eq!(o.scroll, 16);
+        o.handle("\x1b[5~");
+        assert_eq!(o.scroll, 6);
     }
 
     #[test]

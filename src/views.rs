@@ -47,11 +47,7 @@ fn text_view(
     if text.len() > view {
         (text, image) = build(ui, cells.saturating_sub(1));
     }
-    let w = beside_bar(cells, text.len(), view);
-    *scroll = (*scroll).min(text.len().saturating_sub(view));
-    let mut rows = window(&text, *scroll, view, w);
-    add_bar(&mut ui.hits, &mut rows, x + w, y, Scroll::Text, text.len(), *scroll);
-    (rows, image)
+    (text_rows(&mut ui.hits, &text, cells, view, scroll, (x, y)), image)
 }
 
 /// Where a list shown `view` rows at a time from `top` puts the cursor so it stays in view.
