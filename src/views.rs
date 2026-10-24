@@ -33,6 +33,32 @@ fn scrolled(scroll: usize, notches: isize) -> usize {
     (scroll as isize + notches * WHEEL_LINES).max(0) as usize
 }
 
+/// `view` rows of a text from `scroll` (clamped to the end) at column `x`, row `y`: built
+/// again one cell narrower, with a scrollbar beside it, when it does not fit.
+fn text_view(
+    ui: &mut Ui,
+    mut build: impl FnMut(&mut Ui, usize) -> (Vec<Line<'static>>, Option<std::path::PathBuf>),
+    cells: usize,
+    view: usize,
+    scroll: &mut usize,
+    (x, y): (usize, usize),
+) -> (Vec<Line<'static>>, Option<std::path::PathBuf>) {
+    let (mut text, mut image) = build(ui, cells);
+    if text.len() > view {
+        (text, image) = build(ui, cells.saturating_sub(1));
+    }
+    let w = beside_bar(cells, text.len(), view);
+    *scroll = (*scroll).min(text.len().saturating_sub(view));
+    let mut rows = window(&text, *scroll, view, w);
+    add_bar(&mut ui.hits, &mut rows, x + w, y, Scroll::Text, text.len(), *scroll);
+    (rows, image)
+}
+
+/// Where a list shown `view` rows at a time from `top` puts the cursor so it stays in view.
+fn into_view(i: usize, top: usize, view: usize) -> usize {
+    i.clamp(top, top + view.max(1) - 1)
+}
+
 const DOWN: &str = "\x1b[B";
 const UP: &str = "\x1b[A";
 const LEFT: &str = "\x1b[D";
@@ -64,13 +90,15 @@ pub struct TabsView {
     scroll: usize,
     /// the item `scroll` belongs to: another item starts at the top
     scrolled: Option<String>,
+    /// rows of the list as last drawn
+    list_h: usize,
     preview: bool,
     family: usize,
 }
 
 impl TabsView {
     pub fn new() -> TabsView {
-        TabsView { tab: 2, keys: Default::default(), index: [0; 3], following: [true; 3], tops: [0; 3], full: false, scroll: 0, scrolled: None, preview: true, family: 0 }
+        TabsView { tab: 2, keys: Default::default(), index: [0; 3], following: [true; 3], tops: [0; 3], full: false, scroll: 0, scrolled: None, list_h: 0, preview: true, family: 0 }
     }
 
     fn items<'a>(&self, ui: &Ui, s: &'a Session) -> Vec<Item<'a>> {
@@ -169,12 +197,12 @@ impl View for TabsView {
             self.scrolled = key;
         }
         if self.full && item.is_some() {
-            let (detail, image) = detail_of(ui, item, i, items.len(), cells, s, now);
             let kind = ["file", "task", "call"][self.tab];
             lines.push(rule(cells, &format!("{kind} {}/{}", i + 1, items.len()), "n/p next · e failure · h/esc back", dim()));
-            self.scroll = self.scroll.min((detail.len() + 1).saturating_sub(body));
-            ui.mark((0, lines.len(), cells, body.saturating_sub(1)), Region::Preview);
-            lines.extend(window(&detail, self.scroll, body.saturating_sub(1), cells));
+            let view = body.saturating_sub(1);
+            ui.mark((0, lines.len(), cells, view), Region::Preview);
+            let (detail, image) = text_view(ui, |ui, w| detail_of(ui, item, i, items.len(), w, s, now), cells, view, &mut self.scroll, (0, lines.len()));
+            lines.extend(detail);
             if let Some(path) = image {
                 ui.want_image(path, (0, lines.len() + 1 - body.saturating_sub(1), cells, body.saturating_sub(2)));
             }
@@ -187,28 +215,31 @@ impl View for TabsView {
             lines.push(rule(cells, &title, &ui.filter_label(), dim()));
             let list_h = if self.preview && item.is_some() && body >= 10 { 3.max((body - 2) * 45 / 100) } else { body.saturating_sub(1) };
             let t = self.tab;
+            self.list_h = list_h;
             self.tops[t] = visible_top(i, self.tops[t], list_h, items.len());
+            let w = beside_bar(cells, items.len(), list_h);
             let mut rows: Vec<Line<'static>> = items
                 .iter()
                 .enumerate()
                 .skip(self.tops[t])
                 .take(list_h)
-                .map(|(n, x)| item_row(*x, cells, now, s.has_gate, if n == i { sel_bg() } else { none() }))
+                .map(|(n, x)| item_row(*x, w, now, s.has_gate, if n == i { sel_bg() } else { none() }))
                 .collect();
             if items.is_empty() {
                 let empty = if ui.query.is_empty() && !ui.failed_only { "  (nothing yet)" } else { "  (nothing matches)" };
                 rows = vec![plain(cells, empty, dim())];
             }
-            mark_rows(&mut ui.hits, 0, lines.len(), cells, self.tops[t], list_h, items.len());
-            lines.extend(window(&rows, 0, list_h, cells));
+            mark_rows(&mut ui.hits, 0, lines.len(), w, self.tops[t], list_h, items.len());
+            let mut rows = window(&rows, 0, list_h, w);
+            add_bar(&mut ui.hits, &mut rows, w, lines.len(), Scroll::List, items.len(), self.tops[t]);
+            lines.extend(rows);
             if list_h + 1 < body {
                 lines.push(rule(cells, "", "", dim()));
-                let (detail, image) = detail_of(ui, item, i, items.len(), cells, s, now);
                 let preview_h = body - 1 - list_h - 1;
                 // the wheel scrolls the preview; moving the cursor puts it back at the top
-                self.scroll = self.scroll.min(detail.len().saturating_sub(preview_h));
                 ui.mark((0, lines.len(), cells, preview_h), Region::Preview);
-                lines.extend(window(&detail, self.scroll, preview_h, cells));
+                let (detail, image) = text_view(ui, |ui, w| detail_of(ui, item, i, items.len(), w, s, now), cells, preview_h, &mut self.scroll, (0, lines.len()));
+                lines.extend(detail);
                 if let Some(path) = image {
                     ui.want_image(path, (0, lines.len() + 1 - preview_h, cells, preview_h.saturating_sub(1)));
                 }
@@ -286,7 +317,22 @@ impl View for TabsView {
     fn mouse(&mut self, ui: &mut Ui, s: &Session, m: Mouse) -> bool {
         let items = self.items(ui, s);
         let i = self.current(ui, &items) as isize;
+        match on_bar(&mut ui.drag, &ui.hits, m) {
+            BarUse::No => {}
+            BarUse::Held => return true,
+            BarUse::To(Scroll::Text, top) => {
+                self.scroll = top;
+                return true;
+            }
+            BarUse::To(Scroll::List, top) => {
+                // the list shows from there, and the cursor comes along into view
+                self.tops[self.tab] = top;
+                self.move_to(ui, &items, into_view(i as usize, top, self.list_h) as isize);
+                return true;
+            }
+        }
         match (hit(&ui.hits, m.x, m.y), m.press) {
+            (Some(Region::Bar(Bar { scrolls: Scroll::Text, .. })), Press::Wheel(d)) => self.scroll = scrolled(self.scroll, d),
             (Some(Region::Tab(n)), Press::Click | Press::Double) => {
                 self.tab = n;
                 self.full = false;
@@ -423,11 +469,13 @@ pub struct ColumnsView {
     top: usize,
     scroll: usize,
     zoom: bool,
+    /// rows of the list as last drawn
+    list_h: usize,
 }
 
 impl ColumnsView {
     pub fn new() -> ColumnsView {
-        ColumnsView { source: 6, focus: 1, keys: Default::default(), index: Default::default(), following: Default::default(), top: 0, scroll: 0, zoom: false }
+        ColumnsView { source: 6, focus: 1, keys: Default::default(), index: Default::default(), following: Default::default(), top: 0, scroll: 0, zoom: false, list_h: 0 }
     }
 
     fn sid(&self) -> &'static str {
@@ -490,15 +538,21 @@ impl ColumnsView {
         seg_r(count.to_string(), dim(), 7)
     }
 
-    fn list_rows(&mut self, items: &[Item], i: usize, cells: usize, height: usize, now: f64) -> Vec<Line<'static>> {
-        let active = self.focus == 1;
+    /// The list's rows at column `x`, row `y`, with a scrollbar when they do not fit.
+    fn list_rows(&mut self, ui: &mut Ui, items: &[Item], i: usize, cells: usize, height: usize, (x, y): (usize, usize)) -> Vec<Line<'static>> {
+        let (active, now) = (self.focus == 1, now());
+        self.list_h = height;
         self.top = visible_top(i, self.top, height, items.len());
+        let w = beside_bar(cells, items.len(), height);
         let mut rows: Vec<Line<'static>> =
-            items.iter().enumerate().skip(self.top).take(height).map(|(n, x)| item_row(*x, cells, now, false, if n == i { selection(active) } else { none() })).collect();
+            items.iter().enumerate().skip(self.top).take(height).map(|(n, x)| item_row(*x, w, now, false, if n == i { selection(active) } else { none() })).collect();
         if items.is_empty() {
             rows = vec![plain(cells, "  —", dim())];
         }
-        window(&rows, 0, height, cells)
+        mark_rows(&mut ui.hits, x, y, w, self.top, height, items.len());
+        let mut rows = window(&rows, 0, height, w);
+        add_bar(&mut ui.hits, &mut rows, x + w, y, Scroll::List, items.len(), self.top);
+        rows
     }
 }
 
@@ -541,15 +595,15 @@ impl View for ColumnsView {
             (0..dw).for_each(|n| ui.mark((cells.saturating_sub(dw) + n, 1, 1, 1), Region::Source(n)));
             ui.mark((0, 2, cells, 1 + list_h), Region::Column(1));
             lines.push(focus_rule(cells, &format!("{} · newest first", label.trim()), &ui.filter_label(), focus == 1));
-            lines.extend(self.list_rows(&items, i, cells, list_h, now));
-            mark_rows(&mut ui.hits, 0, 3, cells, self.top, list_h, items.len());
-            let (detail, image) = if item.is_some() { detail_of(ui, item, i, items.len(), cells, s, now) } else { (vec![plain(cells, "empty", dim())], None) };
+            let rows = self.list_rows(ui, &items, i, cells, list_h, (0, 3));
+            lines.extend(rows);
             let detail_h = body.saturating_sub(2 + list_h + 1);
             let title = if items.is_empty() { "detail".to_string() } else { format!("detail {}/{}", i + 1, items.len()) };
             ui.mark((0, lines.len(), cells, 1 + detail_h), Region::Column(2));
             lines.push(focus_rule(cells, &title, if focus == 2 { "j/k scroll" } else { "" }, focus == 2));
-            self.scroll = self.scroll.min(detail.len().saturating_sub(detail_h));
-            lines.extend(window(&detail, self.scroll, detail_h, cells));
+            let build = |ui: &mut Ui, w| if item.is_some() { detail_of(ui, item, i, items.len(), w, s, now) } else { (vec![plain(w, "empty", dim())], None) };
+            let (detail, image) = text_view(ui, build, cells, detail_h, &mut self.scroll, (0, lines.len()));
+            lines.extend(detail);
             if let Some(path) = image {
                 ui.want_image(path, (0, lines.len() + 1 - detail_h, cells, detail_h.saturating_sub(1)));
             }
@@ -562,6 +616,17 @@ impl View for ColumnsView {
             let list_w = 36.max((inner - src_w) * 45 / 100);
             let widths = if self.zoom { [0, 0, inner] } else { [src_w, list_w, inner.saturating_sub(src_w + list_w)] };
             let box_h = body.saturating_sub(2);
+            // each column's box first: the rows and scrollbars marked inside lie over it
+            let mut xs = [0; 3];
+            let mut x = 1;
+            for &col in &shown {
+                xs[col] = x;
+                ui.mark((x, 1, widths[col], box_h + 2), Region::Column(col));
+                if col == 0 {
+                    (0..SOURCES.len().min(box_h)).for_each(|n| ui.mark((x, 2 + n, widths[0], 1), Region::Source(n)));
+                }
+                x += widths[col] + 1;
+            }
             let mut content: [Vec<Line<'static>>; 3] = Default::default();
             let mut titles: [String; 3] = Default::default();
             if !self.zoom {
@@ -575,15 +640,15 @@ impl View for ColumnsView {
                     .collect();
                 content[0] = window(&src_rows, 0, box_h, src_w);
                 titles[0] = "sources".into();
-                content[1] = self.list_rows(&items, i, list_w, box_h, now);
+                content[1] = self.list_rows(ui, &items, i, list_w, box_h, (xs[1], 2));
                 let filter = ui.filter_label();
                 titles[1] = format!("{} · {}", label.trim(), if filter.is_empty() { "newest first".to_string() } else { filter });
             }
             let det_w = widths[2];
-            let (detail, image) =
-                if item.is_some() { detail_of(ui, item, i, items.len(), det_w - 1, s, now) } else { (vec![plain(det_w - 1, "nothing here yet", dim())], None) };
-            self.scroll = self.scroll.min(detail.len().saturating_sub(box_h));
-            content[2] = window(&detail, self.scroll, box_h, det_w - 1)
+            let build = |ui: &mut Ui, w| if item.is_some() { detail_of(ui, item, i, items.len(), w, s, now) } else { (vec![plain(w, "nothing here yet", dim())], None) };
+            // one cell of margin on the left
+            let (detail, image) = text_view(ui, build, det_w - 1, box_h, &mut self.scroll, (xs[2] + 1, 2));
+            content[2] = detail
                 .into_iter()
                 .map(|line| {
                     let mut spans = vec![ratatui::text::Span::raw(" ")];
@@ -592,17 +657,6 @@ impl View for ColumnsView {
                 })
                 .collect();
             titles[2] = format!("{}{}", if items.is_empty() { "detail".to_string() } else { format!("detail {}/{}", i + 1, items.len()) }, if self.zoom { " · zoomed" } else { "" });
-            // each column's box, then the rows inside it, which lie over the box
-            let mut x = 1;
-            for &col in &shown {
-                ui.mark((x, 1, widths[col], box_h + 2), Region::Column(col));
-                match col {
-                    0 => (0..SOURCES.len().min(box_h)).for_each(|n| ui.mark((x, 2 + n, widths[0], 1), Region::Source(n))),
-                    1 => mark_rows(&mut ui.hits, x, 2, widths[1], self.top, box_h, items.len()),
-                    _ => {}
-                }
-                x += widths[col] + 1;
-            }
             lines.extend(framed(&shown, &widths, &titles, &content, self.focus, box_h));
             if let Some(path) = image {
                 let left = 1 + shown.iter().filter(|&&c| c < 2).map(|&c| widths[c] + 1).sum::<usize>() + 1;
@@ -693,7 +747,23 @@ impl View for ColumnsView {
     fn mouse(&mut self, ui: &mut Ui, s: &Session, m: Mouse) -> bool {
         let items = self.items_for(ui, s, self.sid());
         let i = self.selected(ui, &items) as isize;
+        match on_bar(&mut ui.drag, &ui.hits, m) {
+            BarUse::No => {}
+            BarUse::Held => return true,
+            BarUse::To(Scroll::Text, top) => {
+                self.scroll = top;
+                return true;
+            }
+            BarUse::To(Scroll::List, top) => {
+                self.top = top;
+                self.move_to(ui, &items, into_view(i as usize, top, self.list_h) as isize);
+                return true;
+            }
+        }
         let region = hit(&ui.hits, m.x, m.y);
+        if matches!(m.press, Press::Drag | Press::Release) {
+            return false;
+        }
         let Press::Wheel(d) = m.press else {
             match region {
                 Some(Region::Source(n)) => {
@@ -717,8 +787,8 @@ impl View for ColumnsView {
                 self.source = (self.source as isize + d).rem_euclid(SOURCES.len() as isize) as usize;
                 self.scroll = 0;
             }
-            Some(Region::Row(_) | Region::Column(1)) => self.move_to(ui, &items, i + d),
-            Some(Region::Column(_)) => self.scroll = scrolled(self.scroll, d),
+            Some(Region::Row(_) | Region::Column(1) | Region::Bar(Bar { scrolls: Scroll::List, .. })) => self.move_to(ui, &items, i + d),
+            Some(Region::Column(_) | Region::Bar(Bar { scrolls: Scroll::Text, .. })) => self.scroll = scrolled(self.scroll, d),
             _ => return false,
         }
         true
@@ -754,13 +824,16 @@ pub struct TimelineView {
     top: usize,
     /// the item the last click picked, and whether it was expanded before that click
     clicked: Option<(String, bool)>,
+    /// the item each line of the stream belongs to, and the rows shown, as last drawn
+    owners: Vec<Option<usize>>,
+    view_h: usize,
 }
 
 const SHOW_KEYS: [&str; 4] = ["f", "t", "s", "c"];
 
 impl TimelineView {
     pub fn new() -> TimelineView {
-        TimelineView { show: [true, true, true, false], key: None, index: 0, open: None, following: true, full: false, scroll: 0, top: 0, clicked: None }
+        TimelineView { show: [true, true, true, false], key: None, index: 0, open: None, following: true, full: false, scroll: 0, top: 0, clicked: None, owners: Vec::new(), view_h: 0 }
     }
 
     fn items<'a>(&self, ui: &Ui, s: &'a Session) -> Vec<Item<'a>> {
@@ -862,6 +935,56 @@ impl TimelineView {
         compose(cells, &segs, bg)
     }
 
+    /// The stream `cells` wide: its lines, the item each belongs to (None for a rule over a
+    /// gap), and the first and last line of item `i`.
+    fn stream(&self, s: &Session, items: &[Item], i: usize, cells: usize, now: f64) -> (Vec<Line<'static>>, Vec<Option<usize>>, usize, usize) {
+        let mut display: Vec<Line<'static>> = Vec::new();
+        let mut owners: Vec<Option<usize>> = Vec::new();
+        let (mut sel_first, mut sel_last) = (0, 0);
+        let mut last_at: Option<f64> = None;
+        for (n, item) in items.iter().enumerate() {
+            if let Some(last) = last_at {
+                if last - item.at() > 600.0 {
+                    display.push(rule(cells, &format!("{} · {} min earlier", crate::text::hm(item.at()), ((last - item.at()) / 60.0) as i64), "", dim()));
+                    owners.push(None);
+                }
+            }
+            last_at = Some(item.at());
+            if n == i {
+                sel_first = display.len();
+            }
+            display.push(self.row(s, *item, cells, now, if n == i { sel_bg() } else { none() }));
+            if self.open.as_deref() == Some(item.key().as_str()) {
+                display.extend(self.expansion(s, *item, cells));
+            }
+            owners.resize(display.len(), Some(n));
+            if n == i {
+                sel_last = display.len() - 1;
+            }
+        }
+        (display, owners, sel_first, sel_last)
+    }
+
+    /// Show the stream from line `top`, the cursor moved onto an item there if it is out of
+    /// view; an expansion stays where it is.
+    fn scroll_to(&mut self, ui: &mut Ui, items: &[Item], i: usize, top: usize) {
+        self.top = top;
+        let end = (top + self.view_h).min(self.owners.len());
+        let shown = self.owners.get(top..end).unwrap_or_default();
+        let rows: Vec<usize> = (0..self.owners.len()).filter(|&r| self.owners[r] == Some(i)).collect();
+        let target = match (rows.first(), rows.last()) {
+            (Some(&first), _) if first < top => shown.iter().flatten().next(),
+            (_, Some(&last)) if last >= end => shown.iter().flatten().last(),
+            _ => None,
+        };
+        if let Some(item) = target.and_then(|&n| items.get(n).map(|x| (n, x))) {
+            self.index = item.0;
+            self.key = Some(item.1.key());
+            self.following = item.0 == 0;
+            ui.focus = self.key.clone();
+        }
+    }
+
     fn expansion(&self, s: &Session, item: Item, cells: usize) -> Vec<Line<'static>> {
         let inner = cells.saturating_sub(11);
         let (body, text, style): (Vec<Line<'static>>, String, ratatui::style::Style) = match item {
@@ -947,43 +1070,24 @@ impl View for TimelineView {
             let item = items[i];
             let calls: Vec<String> = items.iter().filter(|x| matches!(x, Item::Call(_))).map(Item::key).collect();
             let n = calls.iter().position(|k| *k == item.key()).unwrap_or(0);
-            let (detail, image) = detail_of(ui, Some(item), n, calls.len(), cells, s, now);
             lines.push(rule(cells, "full view", "n/p command · e failure · h/esc back", dim()));
-            self.scroll = self.scroll.min((detail.len() + 1).saturating_sub(body));
-            ui.mark((0, lines.len(), cells, body.saturating_sub(1)), Region::Preview);
-            lines.extend(window(&detail, self.scroll, body.saturating_sub(1), cells));
+            let view = body.saturating_sub(1);
+            ui.mark((0, lines.len(), cells, view), Region::Preview);
+            let (detail, image) = text_view(ui, |ui, w| detail_of(ui, Some(item), n, calls.len(), w, s, now), cells, view, &mut self.scroll, (0, lines.len()));
+            lines.extend(detail);
             if let Some(path) = image {
                 ui.want_image(path, (0, lines.len() + 1 - body.saturating_sub(1), cells, body.saturating_sub(2)));
             }
         } else {
             let right = format!("{} {} events", ui.filter_label(), items.len()).trim().to_string();
             lines.push(rule(cells, "live · newest first", &right, dim()));
-            let mut display: Vec<Line<'static>> = Vec::new();
-            // the item each display line belongs to, for clicks
-            let mut owners: Vec<Option<usize>> = Vec::new();
-            let (mut sel_first, mut sel_last) = (0, 0);
-            let mut last_at: Option<f64> = None;
-            for (n, item) in items.iter().enumerate() {
-                if let Some(last) = last_at {
-                    if last - item.at() > 600.0 {
-                        display.push(rule(cells, &format!("{} · {} min earlier", crate::text::hm(item.at()), ((last - item.at()) / 60.0) as i64), "", dim()));
-                        owners.push(None);
-                    }
-                }
-                last_at = Some(item.at());
-                if n == i {
-                    sel_first = display.len();
-                }
-                display.push(self.row(s, *item, cells, now, if n == i { sel_bg() } else { none() }));
-                if self.open.as_deref() == Some(item.key().as_str()) {
-                    display.extend(self.expansion(s, *item, cells));
-                }
-                owners.resize(display.len(), Some(n));
-                if n == i {
-                    sel_last = display.len() - 1;
-                }
-            }
             let view_h = body.saturating_sub(1);
+            let (mut display, mut owners, mut sel_first, mut sel_last) = self.stream(s, &items, i, cells, now);
+            if display.len() > view_h {
+                // one cell narrower, for the scrollbar
+                (display, owners, sel_first, sel_last) = self.stream(s, &items, i, cells - 1, now);
+            }
+            let w = beside_bar(cells, display.len(), view_h);
             if sel_first < self.top {
                 self.top = sel_first;
             } else if sel_last >= self.top + view_h {
@@ -995,10 +1099,14 @@ impl View for TimelineView {
             }
             for (r, owner) in owners.iter().skip(self.top).take(view_h).enumerate() {
                 if let Some(n) = owner {
-                    ui.mark((0, lines.len() + r, cells, 1), Region::Row(*n));
+                    ui.mark((0, lines.len() + r, w, 1), Region::Row(*n));
                 }
             }
-            lines.extend(window(&display, self.top, view_h, cells));
+            let mut rows = window(&display, self.top, view_h, w);
+            add_bar(&mut ui.hits, &mut rows, w, lines.len(), Scroll::List, display.len(), self.top);
+            lines.extend(rows);
+            self.owners = owners;
+            self.view_h = view_h;
         }
         lines.truncate(height.saturating_sub(1));
         while lines.len() < height.saturating_sub(1) {
@@ -1077,6 +1185,21 @@ impl View for TimelineView {
     fn mouse(&mut self, ui: &mut Ui, s: &Session, m: Mouse) -> bool {
         let items = self.items(ui, s);
         let i = self.selected(ui, &items);
+        match on_bar(&mut ui.drag, &ui.hits, m) {
+            BarUse::No => {}
+            BarUse::Held => return true,
+            BarUse::To(Scroll::Text, top) => {
+                self.scroll = top;
+                return true;
+            }
+            BarUse::To(Scroll::List, top) => {
+                self.scroll_to(ui, &items, i, top);
+                return true;
+            }
+        }
+        if matches!(m.press, Press::Drag | Press::Release) {
+            return false;
+        }
         let clicked = self.clicked.take();
         let region = hit(&ui.hits, m.x, m.y);
         match (region, m.press) {
@@ -1306,6 +1429,132 @@ mod tests {
         c.mouse(&mut ui, &s, click(20, y));
         c.mouse(&mut ui, &s, Mouse { press: Press::Double, x: 20, y });
         assert_eq!(c.open, None);
+    }
+
+    fn bars(ui: &Ui) -> Vec<Bar> {
+        ui.hits.iter().filter_map(|(_, r)| if let Region::Bar(b) = r { Some(*b) } else { None }).collect()
+    }
+
+    /// Every line exactly as wide as the screen: a scrollbar takes a cell, it does not add one.
+    fn assert_full_width(lines: &[Line], cells: usize) {
+        for (n, line) in lines.iter().enumerate() {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(width(&text), cells, "line {n}: {text:?}");
+        }
+    }
+
+    fn ages(n: usize) -> Vec<f64> {
+        (0..n).map(|k| 10.0 + k as f64).collect()
+    }
+
+    #[test]
+    fn a_list_that_fits_has_no_scrollbar() {
+        let mut ui = Ui::new(String::new());
+        let s = with_files(&ages(5));
+        let mut a = TabsView::new();
+        a.tab = 0;
+        assert_full_width(&a.render(&mut ui, &s, 80, 24), 80);
+        assert!(bars(&ui).is_empty());
+        let mut c = TimelineView::new();
+        ui.hits.clear();
+        assert_full_width(&c.render(&mut ui, &s, 80, 24), 80);
+        assert!(bars(&ui).is_empty());
+    }
+
+    #[test]
+    fn a_long_list_in_tabs_gets_a_scrollbar_that_pages_and_drags() {
+        let mut ui = Ui::new(String::new());
+        let s = with_files(&ages(40));
+        let mut a = TabsView::new();
+        a.tab = 0;
+        let lines = a.render(&mut ui, &s, 80, 24);
+        assert_full_width(&lines, 80);
+        // the list: eight rows from row 3, the bar in the last column
+        let bar = bars(&ui)[0];
+        assert_eq!((bar.scrolls, bar.y, bar.view, bar.total, bar.top), (Scroll::List, 3, 8, 40, 0));
+        assert_eq!(lines[3].spans.last().unwrap().content, "█");
+        assert_eq!(lines[10].spans.last().unwrap().content, "│");
+        // a click on the track below the thumb is a page down, not a click on the row beside it
+        a.mouse(&mut ui, &s, click(79, 9));
+        a.render(&mut ui, &s, 80, 24);
+        assert_eq!(a.tops[0], 8);
+        assert_eq!(selected_rel(&mut a, &mut ui, &s), "f8.txt");
+        // the thumb dragged to the bottom: the cursor comes along
+        ui.hits.clear();
+        a.render(&mut ui, &s, 80, 24);
+        let (start, _) = thumb(40, 8, 8, 8);
+        a.mouse(&mut ui, &s, click(79, 3 + start));
+        a.mouse(&mut ui, &s, Mouse { press: Press::Drag, x: 79, y: 20 });
+        a.mouse(&mut ui, &s, Mouse { press: Press::Release, x: 79, y: 20 });
+        a.render(&mut ui, &s, 80, 24);
+        assert_eq!((a.tops[0], selected_rel(&mut a, &mut ui, &s).as_str()), (32, "f32.txt"));
+        assert!(ui.drag.is_none());
+    }
+
+    #[test]
+    fn a_long_preview_scrolls_by_its_scrollbar() {
+        let mut ui = Ui::new(String::new());
+        let mut s = with_files(&ages(2));
+        let long = std::env::temp_dir().join(format!("claude-deck-p-{}.txt", std::process::id()));
+        std::fs::write(&long, (0..200).map(|n| format!("line {n}\n")).collect::<String>()).unwrap();
+        s.files[0].path = long.clone();
+        let mut a = TabsView::new();
+        a.tab = 0;
+        assert_full_width(&a.render(&mut ui, &s, 80, 24), 80);
+        let bar = bars(&ui).into_iter().find(|b| b.scrolls == Scroll::Text).unwrap();
+        a.mouse(&mut ui, &s, click(79, bar.y + bar.view - 1));
+        a.render(&mut ui, &s, 80, 24);
+        assert_eq!(a.scroll, bar.view);
+        // and full screen
+        a.handle(&mut ui, &s, "\r");
+        ui.hits.clear();
+        assert_full_width(&a.render(&mut ui, &s, 80, 24), 80);
+        assert!(bars(&ui).iter().any(|b| b.scrolls == Scroll::Text && b.view == 20));
+        let _ = std::fs::remove_file(&long);
+    }
+
+    #[test]
+    fn columns_keep_their_borders_beside_a_scrollbar() {
+        let mut ui = Ui::new(String::new());
+        let s = with_files(&ages(60));
+        let mut b = ColumnsView::new();
+        b.source = 0;
+        let lines = b.render(&mut ui, &s, 120, 30);
+        assert_full_width(&lines, 120);
+        let bar = bars(&ui)[0];
+        assert_eq!((bar.scrolls, bar.y, bar.view), (Scroll::List, 2, 26));
+        // the bar is the list's last cell, right before the border it shares with the detail
+        let x = ui.hits.iter().find(|(_, r)| matches!(r, Region::Bar(_))).unwrap().0.0;
+        let row: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        let cells: Vec<char> = row.chars().collect();
+        assert_eq!((cells[x], cells[x + 1]), ('█', '┃'));
+        // the wheel over the bar moves the list, a click on a row beside it still picks the row
+        b.mouse(&mut ui, &s, Mouse { press: Press::Wheel(1), x, y: 10 });
+        assert_eq!(selected_rel(&mut b, &mut ui, &s), "f1.txt");
+        b.mouse(&mut ui, &s, click(x - 1, 5));
+        assert_eq!(selected_rel(&mut b, &mut ui, &s), "f3.txt");
+        // stacked
+        ui.hits.clear();
+        assert_full_width(&b.render(&mut ui, &s, 80, 30), 80);
+        assert!(bars(&ui).iter().any(|b| b.scrolls == Scroll::List));
+    }
+
+    #[test]
+    fn the_timeline_scrollbar_counts_lines_and_moves_the_cursor_onto_an_item() {
+        let mut ui = Ui::new(String::new());
+        let s = with_files(&ages(50));
+        let mut c = TimelineView::new();
+        assert_full_width(&c.render(&mut ui, &s, 80, 24), 80);
+        let bar = bars(&ui)[0];
+        assert_eq!((bar.total, bar.view), (50, 20));
+        // a page down: the cursor follows onto the first item shown
+        c.mouse(&mut ui, &s, click(79, 3 + 19));
+        c.render(&mut ui, &s, 80, 24);
+        assert_eq!((c.top, selected_rel(&mut c, &mut ui, &s).as_str()), (20, "f20.txt"));
+        // and full screen, the detail
+        c.full = true;
+        ui.hits.clear();
+        assert_full_width(&c.render(&mut ui, &s, 80, 24), 80);
     }
 
     #[test]

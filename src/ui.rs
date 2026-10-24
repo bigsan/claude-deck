@@ -122,6 +122,8 @@ pub enum Region {
     Column(usize),
     /// a preview or detail that scrolls
     Preview,
+    /// a scrollbar
+    Bar(Bar),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -130,6 +132,10 @@ pub enum Press {
     Double,
     /// notches down, negative up
     Wheel(isize),
+    /// moved with the left button held
+    Drag,
+    /// the left button let go
+    Release,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,6 +143,130 @@ pub struct Mouse {
     pub press: Press,
     pub x: usize,
     pub y: usize,
+}
+
+/// What a scrollbar scrolls: a list, whose cursor follows into view, or a text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Scroll {
+    List,
+    Text,
+}
+
+/// A scrollbar as drawn: `view` of `total` lines from `top`, in rows `y..y + view`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bar {
+    pub scrolls: Scroll,
+    pub y: usize,
+    pub total: usize,
+    pub view: usize,
+    pub top: usize,
+}
+
+impl Bar {
+    fn last_top(&self) -> usize {
+        self.total.saturating_sub(self.view)
+    }
+
+    /// The first line shown when the thumb starts `row` rows down the track: the thumb's
+    /// travel spread over the lines it can scroll.
+    fn top_at(&self, row: usize) -> usize {
+        let travel = self.view - thumb(self.total, self.view, self.top, self.view).1;
+        (row.min(travel) * self.last_top() + travel / 2).checked_div(travel).unwrap_or(0)
+    }
+}
+
+/// (first row, rows) of the thumb in a track of `track` rows, as ratatui's Scrollbar draws it
+/// for a ScrollbarState of `total - view + 1` positions and a viewport of `view`.
+pub fn thumb(total: usize, view: usize, top: usize, track: usize) -> (usize, usize) {
+    if track == 0 || total == 0 {
+        return (0, 0);
+    }
+    let round = |n: usize, d: usize| (n + d / 2) / d;
+    let len = round(view * track, total).clamp(1, track);
+    let start = round(top.min(total.saturating_sub(view)) * track, total).min(track - len);
+    (start, len)
+}
+
+/// A scrollbar column, one span per row of the view, when `total` lines do not fit in `view`.
+pub fn scrollbar(total: usize, view: usize, top: usize) -> Option<Vec<Span<'static>>> {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
+    if total <= view || view == 0 {
+        return None;
+    }
+    let area = Rect::new(0, 0, 1, view.min(u16::MAX as usize) as u16);
+    let mut buf = Buffer::empty(area);
+    let mut state = ScrollbarState::new(total - view + 1).position(top).viewport_content_length(view);
+    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("│"))
+        .track_style(dim())
+        .thumb_symbol("█")
+        .thumb_style(none())
+        .render(area, &mut buf, &mut state);
+    Some((0..area.height).map(|y| Span::styled(buf[(0, y)].symbol().to_string(), buf[(0, y)].style())).collect())
+}
+
+/// The width left for lines next to a scrollbar: one cell less when they do not fit.
+pub fn beside_bar(cells: usize, total: usize, view: usize) -> usize {
+    if total > view && view > 0 { cells.saturating_sub(1) } else { cells }
+}
+
+/// Put a scrollbar at the end of `lines` (the rows of a view drawn one cell narrower) when
+/// `total` lines do not fit in them, and mark it at column `x`, row `y`.
+pub fn add_bar(hits: &mut Vec<(Area, Region)>, lines: &mut [Line<'static>], x: usize, y: usize, scrolls: Scroll, total: usize, top: usize) {
+    let view = lines.len();
+    let Some(spans) = scrollbar(total, view, top) else { return };
+    for (line, span) in lines.iter_mut().zip(spans) {
+        line.spans.push(span);
+    }
+    hits.push(((x, y, 1, view), Region::Bar(Bar { scrolls, y, total, view, top })));
+}
+
+/// What a press does to a scrollbar.
+#[derive(Debug, PartialEq)]
+pub enum BarUse {
+    /// not a scrollbar's
+    No,
+    /// the thumb taken or let go
+    Held,
+    /// show from this line on
+    To(Scroll, usize),
+}
+
+/// A click on the track pages, a press on the thumb takes it, and a drag moves it; `drag`
+/// keeps the scrollbar held and how far down the thumb it was taken.
+pub fn on_bar(drag: &mut Option<(Bar, usize)>, hits: &[(Area, Region)], m: Mouse) -> BarUse {
+    match m.press {
+        Press::Drag => match drag {
+            Some((bar, grab)) => BarUse::To(bar.scrolls, bar.top_at(m.y.saturating_sub(bar.y + *grab))),
+            None => BarUse::No,
+        },
+        Press::Release => {
+            if drag.take().is_some() {
+                BarUse::Held
+            } else {
+                BarUse::No
+            }
+        }
+        // a double-click on the track is two pages
+        Press::Click | Press::Double => {
+            let Some(Region::Bar(bar)) = hit(hits, m.x, m.y) else { return BarUse::No };
+            let (start, len) = thumb(bar.total, bar.view, bar.top, bar.view);
+            let row = m.y - bar.y;
+            if row < start {
+                BarUse::To(bar.scrolls, bar.top.saturating_sub(bar.view))
+            } else if row >= start + len {
+                BarUse::To(bar.scrolls, (bar.top + bar.view).min(bar.last_top()))
+            } else {
+                *drag = Some((bar, row - start));
+                BarUse::Held
+            }
+        }
+        Press::Wheel(_) => BarUse::No,
+    }
 }
 
 /// The region at (x, y); a region marked later lies over the ones before it.
@@ -176,6 +306,8 @@ pub struct Ui {
     pub image_want: Option<(PathBuf, (usize, usize, usize, usize))>,
     /// where the current frame put what a click can land on
     pub hits: Vec<(Area, Region)>,
+    /// the scrollbar whose thumb the mouse holds
+    pub drag: Option<(Bar, usize)>,
     wrapped: HashMap<u64, Vec<Line<'static>>>,
     /// file previews as read, per file version: a frame does not read the file again
     texts: HashMap<(PathBuf, u64, u64), Option<std::rc::Rc<String>>>,
@@ -195,6 +327,7 @@ impl Ui {
             view_name: "",
             image_want: None,
             hits: Vec::new(),
+            drag: None,
             wrapped: HashMap::new(),
             texts: HashMap::new(),
         }
@@ -804,6 +937,57 @@ mod tests {
 
     fn visible(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The thumb rows ratatui's Scrollbar draws.
+    fn drawn_thumb(total: usize, view: usize, top: usize) -> Option<(usize, usize)> {
+        let spans = scrollbar(total, view, top)?;
+        let rows: Vec<usize> = spans.iter().enumerate().filter(|(_, s)| s.content == "█").map(|(n, _)| n).collect();
+        Some((rows[0], rows.len()))
+    }
+
+    #[test]
+    fn the_thumb_shows_where_the_view_is_and_how_much_of_it() {
+        // fits: no scrollbar at all
+        assert_eq!(scrollbar(10, 10, 0), None);
+        assert_eq!(scrollbar(3, 10, 0), None);
+        assert_eq!(beside_bar(80, 10, 10), 80);
+        assert_eq!(beside_bar(80, 11, 10), 79);
+        // a quarter of the lines: a quarter of the track, from the top to the bottom
+        assert_eq!(thumb(40, 10, 0, 10), (0, 3));
+        assert_eq!(thumb(40, 10, 30, 10), (7, 3));
+        assert_eq!(thumb(40, 10, 15, 10), (4, 3));
+        // a long list still gets a thumb of one row, which reaches the bottom
+        assert_eq!(thumb(10_000, 10, 0, 10), (0, 1));
+        assert_eq!(thumb(10_000, 10, 9_990, 10), (9, 1));
+        // the same as ratatui draws, wherever the view is
+        for (total, view) in [(11, 10), (40, 10), (100, 7), (1000, 23), (25, 24)] {
+            for top in 0..=total - view {
+                assert_eq!(drawn_thumb(total, view, top), Some(thumb(total, view, top, view)), "{total} {view} {top}");
+            }
+        }
+        let spans = scrollbar(40, 4, 0).unwrap();
+        assert_eq!(spans.iter().map(|s| s.content.as_ref()).collect::<String>(), "█│││");
+    }
+
+    #[test]
+    fn the_track_pages_and_the_thumb_drags() {
+        let bar = Bar { scrolls: Scroll::Text, y: 5, total: 40, view: 10, top: 15 };
+        let hits = vec![((79, 5, 1, 10), Region::Bar(bar))];
+        let mut drag = None;
+        let at = |press, y| Mouse { press, x: 79, y };
+        // the thumb is rows 4..7 of the track: rows 9..12 on the screen
+        assert_eq!(on_bar(&mut drag, &hits, at(Press::Click, 6)), BarUse::To(Scroll::Text, 5));
+        assert_eq!(on_bar(&mut drag, &hits, at(Press::Click, 14)), BarUse::To(Scroll::Text, 25));
+        assert_eq!(on_bar(&mut drag, &hits, Mouse { press: Press::Click, x: 78, y: 6 }), BarUse::No);
+        // taken one row down the thumb, dragged to the top and the bottom
+        assert_eq!(on_bar(&mut drag, &hits, at(Press::Click, 10)), BarUse::Held);
+        assert_eq!(on_bar(&mut drag, &hits, at(Press::Drag, 6)), BarUse::To(Scroll::Text, 0));
+        assert_eq!(on_bar(&mut drag, &hits, at(Press::Drag, 9)), BarUse::To(Scroll::Text, 13));
+        assert_eq!(on_bar(&mut drag, &hits, at(Press::Drag, 13)), BarUse::To(Scroll::Text, 30));
+        assert_eq!(on_bar(&mut drag, &hits, at(Press::Drag, 30)), BarUse::To(Scroll::Text, 30));
+        assert_eq!(on_bar(&mut drag, &hits, at(Press::Release, 30)), BarUse::Held);
+        assert_eq!(on_bar(&mut drag, &hits, at(Press::Drag, 6)), BarUse::No);
     }
 
     #[test]

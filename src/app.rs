@@ -25,9 +25,10 @@ const VERSION: &str = concat!("claude-deck ", env!("CARGO_PKG_VERSION"));
 const POLL: Duration = Duration::from_millis(250);
 // Two clicks on the same cell this close together are a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-// Normal mouse tracking (presses and the wheel, no motion) in SGR encoding, and off again.
-const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
-const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
+// Mouse tracking in SGR encoding: presses, the wheel, and moves only while a button is held
+// (to drag a scrollbar's thumb); and off again.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 // How often to look for changes: every second while something changes, backing
 // off to 2 s after 10 s of quiet and 5 s after 30 s. A scratchpad big enough that
 // one look is expensive is looked at no more often than BUDGET allows.
@@ -75,6 +76,44 @@ fn watch_terminal() {
     });
 }
 
+/// The keys screen, scrolled with a scrollbar when it does not fit.
+#[derive(Default)]
+struct Help {
+    top: usize,
+    hits: Vec<(Area, Region)>,
+    drag: Option<(Bar, usize)>,
+}
+
+impl Help {
+    /// `height` rows of the screen `build` makes for a width, one cell narrower beside a scrollbar.
+    fn render(&mut self, build: impl Fn(usize) -> Vec<Line<'static>>, cells: usize, height: usize) -> Vec<Line<'static>> {
+        self.hits.clear();
+        let mut lines = build(cells);
+        if lines.len() > height {
+            lines = build(cells.saturating_sub(1));
+        }
+        let w = beside_bar(cells, lines.len(), height);
+        self.top = self.top.min(lines.len().saturating_sub(height));
+        let mut rows = window(&lines, self.top, height, w);
+        add_bar(&mut self.hits, &mut rows, w, 0, Scroll::Text, lines.len(), self.top);
+        rows
+    }
+
+    /// False to close: a click does, as any key does; the wheel and the scrollbar scroll.
+    fn mouse(&mut self, m: Mouse) -> bool {
+        match on_bar(&mut self.drag, &self.hits, m) {
+            BarUse::To(_, top) => self.top = top,
+            BarUse::Held => {}
+            BarUse::No => match m.press {
+                Press::Wheel(d) => self.top = (self.top as isize + d * 3).max(0) as usize,
+                Press::Click | Press::Double => return false,
+                Press::Drag | Press::Release => {}
+            },
+        }
+        true
+    }
+}
+
 /// What a key asks of the deck.
 enum Flow {
     Stay,
@@ -90,6 +129,7 @@ pub struct App {
     views: Vec<Box<dyn View>>,
     view: usize,
     help_on: bool,
+    help: Help,
     dirty: bool,
     scan_cost: f64,
     last_change: f64,
@@ -124,6 +164,7 @@ impl App {
             view: view.min(views.len() - 1),
             views,
             help_on: false,
+            help: Help::default(),
             dirty: true,
             scan_cost: 0.0,
             last_change: now(),
@@ -227,7 +268,7 @@ impl App {
         self.ui.say("no clipboard tool (pbcopy, wl-copy, xclip)");
     }
 
-    fn help_lines(&self, cells: usize, height: usize) -> Vec<Line<'static>> {
+    fn help_lines(&self, cells: usize) -> Vec<Line<'static>> {
         let view = &self.views[self.view];
         let mut lines = vec![self.ui.header(&self.session, cells), rule(cells, &format!("keys · {}", view.name()), VERSION, dim())];
         let common: &[(&str, &str)] = &[
@@ -247,7 +288,7 @@ impl App {
         for (key, what) in view.help().iter().chain([("", "")].iter()).chain(back.iter()).chain(common.iter()).chain(mouse.iter()) {
             lines.push(compose(cells, &[seg(format!("  {key}"), yellow(), 14), flex(*what, dim())], none()));
         }
-        window(&lines, 0, height, cells)
+        lines
     }
 
     // -- input
@@ -317,7 +358,10 @@ impl App {
                 self.rescan();
                 self.ui.say(format!("rescanned · {} files in {:.0} ms", self.session.files.len(), self.scan_cost * 1000.0));
             }
-            "?" => self.help_on = true,
+            "?" => {
+                self.help_on = true;
+                self.help.top = 0;
+            }
             _ => {}
         }
         Flow::Stay
@@ -328,8 +372,7 @@ impl App {
             return;
         }
         if self.help_on {
-            // a click closes the keys, as any key does
-            self.help_on = matches!(m.press, Press::Wheel(_));
+            self.help_on = self.help.mouse(m);
             self.dirty = true;
             return;
         }
@@ -368,7 +411,10 @@ impl App {
         self.ui.hits.clear();
         self.ui.view_name = self.views[self.view].name();
         if self.help_on {
-            self.help_lines(cells, height)
+            let mut help = std::mem::take(&mut self.help);
+            let lines = help.render(|w| self.help_lines(w), cells, height);
+            self.help = help;
+            lines
         } else {
             self.views[self.view].render(&mut self.ui, &self.session, cells, height)
         }
@@ -393,6 +439,7 @@ pub struct Deck {
     /// the view a session opens in
     view: String,
     help_on: bool,
+    help: Help,
     kitty: Kitty,
     /// the last click, for telling a double-click
     last_click: Option<(Instant, u16, u16)>,
@@ -400,11 +447,11 @@ pub struct Deck {
 
 impl Deck {
     pub fn sessions(home: Option<String>, view: &str) -> Deck {
-        Deck { overview: Some(Overview::new(home)), app: None, view: view.to_string(), help_on: false, kitty: Kitty::new(), last_click: None }
+        Deck { overview: Some(Overview::new(home)), app: None, view: view.to_string(), help_on: false, help: Help::default(), kitty: Kitty::new(), last_click: None }
     }
 
     pub fn session(app: App) -> Deck {
-        Deck { overview: None, view: app.view_letter(), app: Some(app), help_on: false, kitty: Kitty::new(), last_click: None }
+        Deck { overview: None, view: app.view_letter(), app: Some(app), help_on: false, help: Help::default(), kitty: Kitty::new(), last_click: None }
     }
 
     /// One line about the session, or the list of sessions, for a pipe instead of a terminal.
@@ -418,7 +465,7 @@ impl Deck {
         }
     }
 
-    fn overview_help(&self, o: &Overview, cells: usize, height: usize) -> Vec<Line<'static>> {
+    fn overview_help(o: &Overview, cells: usize) -> Vec<Line<'static>> {
         let mut lines = vec![rule(cells, "keys · all sessions", VERSION, dim())];
         let mouse: &[(&str, &str)] = if mouse_on() { &[("mouse", "wheel moves · click picks · double-click opens")] } else { &[] };
         for (key, what) in o.help().iter().chain(mouse.iter()) {
@@ -426,7 +473,7 @@ impl Deck {
         }
         lines.push(blank(cells));
         lines.push(plain(cells, "  ⏸ waiting for a permission answer · busy · idle; waiting sessions come first", dim()));
-        window(&lines, 0, height, cells)
+        lines
     }
 
     fn busy(&self) -> bool {
@@ -466,6 +513,7 @@ impl Deck {
         }
         if key == "?" && !o.typing {
             self.help_on = true;
+            self.help.top = 0;
             return true;
         }
         match o.handle(key) {
@@ -488,6 +536,8 @@ impl Deck {
                 self.last_click = if double { None } else { Some((Instant::now(), m.column, m.row)) };
                 if double { Press::Double } else { Press::Click }
             }
+            MouseEventKind::Drag(MouseButton::Left) => Press::Drag,
+            MouseEventKind::Up(MouseButton::Left) => Press::Release,
             MouseEventKind::ScrollDown => Press::Wheel(1),
             MouseEventKind::ScrollUp => Press::Wheel(-1),
             _ => return None,
@@ -516,7 +566,7 @@ impl Deck {
         }
         let Some(o) = &mut self.overview else { return false };
         if self.help_on {
-            self.help_on = matches!(m.press, Press::Wheel(_));
+            self.help_on = self.help.mouse(m);
             return true;
         }
         match o.mouse(m) {
@@ -538,8 +588,7 @@ impl Deck {
         }
         let Some(o) = &mut self.overview else { return (Vec::new(), None) };
         if self.help_on {
-            let o = self.overview.as_ref().unwrap();
-            return (self.overview_help(o, cells, height), None);
+            return (self.help.render(|w| Deck::overview_help(o, w), cells, height), None);
         }
         (o.render(cells, height), None)
     }
@@ -715,7 +764,37 @@ mod tests {
         d.last_click = Instant::now().checked_sub(DOUBLE_CLICK + Duration::from_millis(50)).map(|at| (at, 4, 4));
         assert_eq!(d.press(down(4, 4)).map(|m| m.press), Some(Press::Click));
         let up = MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), ..down(4, 4) };
-        assert_eq!(d.press(up), None);
+        assert_eq!(d.press(up).map(|m| m.press), Some(Press::Release));
+        let right = MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), ..down(4, 4) };
+        assert_eq!(d.press(right), None);
+    }
+
+    #[test]
+    fn the_keys_scroll_when_they_do_not_fit_and_a_click_beside_closes_them() {
+        let mut d = deck();
+        let app = d.app.as_mut().unwrap();
+        app.handle("?");
+        let lines = app.frame(80, 10);
+        assert_eq!(lines.len(), 10);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with('█'), "{text}");
+        // the wheel scrolls, a click on the track pages, a click elsewhere closes
+        app.mouse(Mouse { press: Press::Wheel(1), x: 10, y: 5 });
+        assert_eq!(app.help.top, 3);
+        app.frame(80, 10);
+        app.mouse(Mouse { press: Press::Click, x: 79, y: 9 });
+        assert!(app.help_on);
+        // a page, or up to the end
+        let total = app.help_lines(79).len();
+        assert_eq!(app.help.top, 13.min(total - 10));
+        app.mouse(Mouse { press: Press::Click, x: 10, y: 5 });
+        assert!(!app.help_on);
+        // tall enough: no scrollbar
+        app.handle("?");
+        let lines = app.frame(80, 60);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(crate::text::width(&text), 80);
+        assert!(app.help.hits.is_empty());
     }
 
     #[test]

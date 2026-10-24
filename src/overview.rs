@@ -162,6 +162,10 @@ pub struct Overview {
     home: Option<String>,
     /// where the last frame put its rows, for clicks
     hits: Vec<(Area, Region)>,
+    /// the scrollbar whose thumb the mouse holds
+    drag: Option<(Bar, usize)>,
+    /// rows of the list as last drawn
+    list_h: usize,
 }
 
 const HELP: &[(&str, &str)] = &[
@@ -197,6 +201,8 @@ impl Overview {
             typing: false,
             home,
             hits: Vec::new(),
+            drag: None,
+            list_h: 0,
         };
         o.sync();
         o
@@ -372,15 +378,19 @@ impl Overview {
         let selected = shown.get(i).map(|&r| &self.rows[r]);
         let list_h = if self.preview && selected.is_some() && body >= 12 { 3.max((body - 2) * 50 / 100).min(shown.len().max(1)) } else { body.saturating_sub(1) };
         self.top = visible_top(i, self.top, list_h, shown.len());
+        self.list_h = list_h;
+        let w = beside_bar(cells, shown.len(), list_h);
         let mut rows: Vec<Line<'static>> =
-            shown.iter().enumerate().skip(self.top).take(list_h).map(|(n, &r)| self.row(&self.rows[r], cells, now, if n == i { sel_bg() } else { none() })).collect();
+            shown.iter().enumerate().skip(self.top).take(list_h).map(|(n, &r)| self.row(&self.rows[r], w, now, if n == i { sel_bg() } else { none() })).collect();
         if shown.is_empty() {
             let empty = if !self.loaded { "  reading sessions…" } else if self.query.is_empty() { "  (no Claude Code session is running)" } else { "  (nothing matches)" };
             rows = vec![plain(cells, empty, dim())];
         }
         self.hits.clear();
-        mark_rows(&mut self.hits, 0, lines.len(), cells, self.top, list_h, shown.len());
-        lines.extend(window(&rows, 0, list_h, cells));
+        mark_rows(&mut self.hits, 0, lines.len(), w, self.top, list_h, shown.len());
+        let mut rows = window(&rows, 0, list_h, w);
+        add_bar(&mut self.hits, &mut rows, w, lines.len(), Scroll::List, shown.len(), self.top);
+        lines.extend(rows);
         if let Some(row) = selected.filter(|_| list_h + 1 < body) {
             lines.push(rule(cells, "", "", dim()));
             let detail = self.detail(row, cells);
@@ -453,6 +463,15 @@ impl Overview {
         }
         let shown = self.shown();
         let i = self.current(&shown) as isize;
+        match on_bar(&mut self.drag, &self.hits, m) {
+            BarUse::No => {}
+            BarUse::Held | BarUse::To(Scroll::Text, _) => return Flow::Stay,
+            BarUse::To(Scroll::List, top) => {
+                self.top = top;
+                self.move_to(&shown, i.clamp(top as isize, (top + self.list_h.max(1)) as isize - 1));
+                return Flow::Stay;
+            }
+        }
         match (hit(&self.hits, m.x, m.y), m.press) {
             (_, Press::Wheel(d)) => self.move_to(&shown, i + d),
             (Some(Region::Row(n)), Press::Click) => self.move_to(&shown, n as isize),
@@ -517,5 +536,20 @@ mod tests {
         }
         // below the last session there is nothing to open
         assert!(matches!(o.mouse(Mouse { press: Press::Double, x: 5, y: 7 }), Flow::Stay));
+    }
+
+    #[test]
+    fn a_long_list_of_sessions_gets_a_scrollbar() {
+        let mut o = Overview::new(None);
+        o.rows = (0..40).map(|n| Row { live: live(n), stats: None }).collect();
+        o.loaded = true;
+        o.preview = false;
+        let lines = o.render(80, 24);
+        let text: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!((crate::text::width(&text), text.ends_with('█')), (80, true));
+        // the list is 21 rows from row 2: a page down from the track's end goes to the end
+        o.mouse(Mouse { press: Press::Click, x: 79, y: 22 });
+        o.render(80, 24);
+        assert_eq!((o.top, o.key.as_deref()), (19, Some("s19-0000")));
     }
 }
