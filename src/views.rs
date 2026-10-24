@@ -752,7 +752,23 @@ impl View for ColumnsView {
     fn mouse(&mut self, ui: &mut Ui, s: &Session, m: Mouse) -> bool {
         let items = self.items_for(ui, s, self.sid());
         let i = self.selected(ui, &items) as isize;
-        match on_bar(&mut ui.drag, &ui.hits, m) {
+        // a scrollbar's column takes the focus, as a click anywhere else in it does
+        let column = |scrolls| match scrolls {
+            Scroll::Sources => 0,
+            Scroll::List => 1,
+            Scroll::Text => 2,
+        };
+        let used = on_bar(&mut ui.drag, &ui.hits, m);
+        match &used {
+            BarUse::To(scrolls, _) => self.focus = column(*scrolls),
+            BarUse::Held => {
+                if let Some((bar, _)) = ui.drag {
+                    self.focus = column(bar.scrolls);
+                }
+            }
+            BarUse::No => {}
+        }
+        match used {
             BarUse::No => {}
             BarUse::Held => return true,
             BarUse::To(Scroll::Text, top) => {
@@ -1561,6 +1577,10 @@ mod tests {
         assert_eq!(selected_rel(&mut b, &mut ui, &s), "f1.txt");
         b.mouse(&mut ui, &s, click(x - 1, 5));
         assert_eq!(selected_rel(&mut b, &mut ui, &s), "f3.txt");
+        // a click on a scrollbar focuses its column, as a click anywhere else in it does
+        b.focus = 2;
+        b.mouse(&mut ui, &s, click(x, 27));
+        assert_eq!(b.focus, 1);
         // stacked
         ui.hits.clear();
         assert_full_width(&b.render(&mut ui, &s, 80, 30), 80);
@@ -1592,9 +1612,10 @@ mod tests {
         ui.hits.clear();
         b.render(&mut ui, &s, 120, 12);
         let x = ui.hits.iter().find(|(_, r)| matches!(r, Region::Bar(Bar { scrolls: Scroll::Sources, .. }))).unwrap().0.0;
+        b.focus = 2;
         b.mouse(&mut ui, &s, click(x, 2));
         b.render(&mut ui, &s, 120, 12);
-        assert_eq!((b.src_top, b.source), (0, 7));
+        assert_eq!((b.src_top, b.source, b.focus), (0, 7, 0));
         // tall enough: no scrollbar for them
         ui.hits.clear();
         b.render(&mut ui, &s, 120, 30);
