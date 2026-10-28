@@ -148,6 +148,9 @@ pub struct TaskItem {
     pub exit: Option<i32>,
     pub rows: usize,
     pub text: String,
+    /// what the call that started it said it was doing: its description and command
+    pub desc: String,
+    pub command: String,
 }
 
 static EXITED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[exited with code (-?\d+)\]\s*$").unwrap());
@@ -236,7 +239,7 @@ pub fn scan_tasks(session_dir: &Path, previous: &HashMap<String, TaskItem>) -> V
         }
         let is_link = fs::symlink_metadata(&path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
         let kind = if name.starts_with('a') && is_link { TaskKind::Agent } else { TaskKind::Shell };
-        let mut item = TaskItem { path, name, kind, size, mtime: modified, born: birth(&meta), exit: None, rows: 0, text: String::new() };
+        let mut item = TaskItem { path, name, kind, size, mtime: modified, born: birth(&meta), exit: None, rows: 0, text: String::new(), desc: String::new(), command: String::new() };
         item.load();
         out.push(item);
     }
@@ -758,8 +761,14 @@ impl Session {
     /// with the running shell calls whose start is closest to the file's.
     fn split_tasks(&mut self, found: Vec<TaskItem>) {
         let background: HashSet<String> = self.calls.values().filter_map(|c| c.task.clone()).collect();
-        let (tasks, mut live): (Vec<TaskItem>, Vec<TaskItem>) =
+        let (mut tasks, mut live): (Vec<TaskItem>, Vec<TaskItem>) =
             found.into_iter().partition(|t| t.kind == TaskKind::Agent || background.contains(&t.name));
+        for task in &mut tasks {
+            if let Some(call) = self.calls.values().find(|c| c.task.as_deref() == Some(task.name.as_str())) {
+                task.desc = call.desc.clone();
+                task.command = call.input["command"].as_str().unwrap_or("").to_string();
+            }
+        }
         live.sort_by(|a, b| a.born.total_cmp(&b.born));
         for call in self.calls.values_mut() {
             call.live = None;
@@ -915,6 +924,7 @@ mod tests {
         let mut s = Session::new(session, Some(transcript));
         assert!(s.refresh());
         assert_eq!(s.tasks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["bbg"]);
+        assert_eq!(s.tasks[0].command, "npm run dev");
         assert_eq!(s.calls["t2"].live.as_deref(), Some("bfg"));
         assert_eq!((s.calls["t3"].exit, s.calls["t3"].duration_ms()), (Some(1), Some(1250.0)));
         assert!(!s.refresh());

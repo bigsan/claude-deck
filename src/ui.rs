@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 
 use crate::data::{Call, Family, FileItem, PREVIEW_BYTES, Session, TaskItem, TaskKind, Verdict, read_text};
 use crate::render::{self, Logical};
-use crate::text::{fit, human_age, human_duration, human_size, hms, now, sanitize, width, wrap, ymd};
+use crate::text::{fit, human_age, human_duration, human_size, hms, now, one_line, sanitize, width, wrap, ymd};
 
 pub const SPIN: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 pub const FAMILIES: [&str; 4] = ["shell", "file", "other", "all"];
@@ -811,13 +811,18 @@ pub fn task_status(task: &TaskItem, now: f64) -> Seg {
     }
 }
 
+/// What the task is doing: its call's description, else its command, else its id.
+fn task_label(task: &TaskItem) -> String {
+    one_line([task.desc.as_str(), task.command.as_str()].into_iter().find(|t| !t.is_empty()).unwrap_or(&task.name))
+}
+
 pub fn task_row(task: &TaskItem, cells: usize, now: f64, bg: Style) -> Line<'static> {
     let agent = task.kind == TaskKind::Agent;
     let mut segs = vec![
         seg(if agent { "◆" } else { "⚙" }, if agent { magenta() } else { cyan() }, 2),
         seg(if agent { "subagent" } else { "bg shell" }, dim(), 9),
         task_status(task, now),
-        flex(&task.name, none()),
+        flex(task_label(task), none()),
     ];
     if cells >= 70 {
         segs.push(seg_r(human_size(task.size), dim(), 8));
@@ -941,6 +946,13 @@ pub fn task_detail(task: &TaskItem, cells: usize, now: f64) -> Vec<Line<'static>
         if let Ok(target) = std::fs::read_link(&task.path) {
             lines.push(plain(cells, &format!("→ {}", target.display()), dim()));
         }
+    }
+    if !task.desc.is_empty() {
+        lines.extend(wrapped(cells, &task.desc, dim()));
+    }
+    if !task.command.is_empty() {
+        lines.push(rule(cells, "command", "", dim()));
+        lines.extend(wrapped(cells, &task.command, none()));
     }
     lines.push(rule(cells, if agent { "transcript (condensed)" } else { "output tail" }, "", dim()));
     lines.extend(wrapped(cells, if task.text.is_empty() { "(empty)" } else { &task.text }, none()));
