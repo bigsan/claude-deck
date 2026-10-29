@@ -103,7 +103,12 @@ impl TabsView {
             1 => s.tasks.iter().map(Item::Task).collect(),
             _ => {
                 let fam = FAMILIES[self.family];
-                s.calls_newest().into_iter().filter(|c| fam == "all" || c.family.name() == fam).map(Item::Call).collect()
+                let mut items: Vec<Item> = s.calls_newest().into_iter().filter(|c| fam == "all" || c.family.name() == fam).map(Item::Call).collect();
+                if fam == "all" {
+                    items.extend(s.prompts_newest().map(Item::Prompt));
+                    items.sort_by(|a, b| b.at().total_cmp(&a.at()));
+                }
+                items
             }
         };
         ui.filtered(items)
@@ -427,7 +432,7 @@ pub fn framed(shown: &[usize], widths: &[usize; 3], titles: &[String; 3], conten
     rows
 }
 
-const SOURCES: [(&str, &str); 11] = [
+const SOURCES: [(&str, &str); 12] = [
     ("scratch", "SCRATCHPAD"),
     ("images", " └ images"),
     ("tasks", "TASKS"),
@@ -439,6 +444,7 @@ const SOURCES: [(&str, &str); 11] = [
     ("other", " └ other"),
     ("failed", " └ ✗ failed"),
     ("denied", " └ ⊘ denied"),
+    ("prompts", "PROMPTS"),
 ];
 
 const COLUMNS_HELP: &[(&str, &str)] = &[
@@ -492,6 +498,7 @@ impl ColumnsView {
             "calls" => calls().map(Item::Call).collect(),
             "failed" => calls().filter(|c| c.failed() && !c.refused()).map(Item::Call).collect(),
             "denied" => calls().filter(|c| c.refused()).map(Item::Call).collect(),
+            "prompts" => s.prompts_newest().map(Item::Prompt).collect(),
             family => calls().filter(|c| c.family.name() == family).map(Item::Call).collect(),
         };
         ui.filtered(items)
@@ -831,7 +838,7 @@ const TIMELINE_HELP: &[(&str, &str)] = &[
     ("e", "next failure"),
     ("l → o", "open full screen"),
     ("h ← esc", "back; in the list, collapse"),
-    ("f t s c", "toggle files / tasks / shell / other calls"),
+    ("f t s c m", "toggle files / tasks / shell / other calls / prompts"),
     ("x", "failures only"),
     ("/", "filter"),
     ("y", "copy command or path"),
@@ -840,8 +847,8 @@ const TIMELINE_HELP: &[(&str, &str)] = &[
 
 /// C: files, tasks and calls in one stream, newest first.
 pub struct TimelineView {
-    /// files, tasks, shell calls, other calls
-    show: [bool; 4],
+    /// files, tasks, shell calls, other calls, prompts
+    show: [bool; 5],
     key: Option<String>,
     index: usize,
     open: Option<String>,
@@ -856,11 +863,11 @@ pub struct TimelineView {
     view_h: usize,
 }
 
-const SHOW_KEYS: [&str; 4] = ["f", "t", "s", "c"];
+const SHOW_KEYS: [&str; 5] = ["f", "t", "s", "c", "m"];
 
 impl TimelineView {
     pub fn new() -> TimelineView {
-        TimelineView { show: [true, true, true, false], key: None, index: 0, open: None, following: true, full: false, scroll: 0, top: 0, clicked: None, owners: Vec::new(), view_h: 0 }
+        TimelineView { show: [true, true, true, false, true], key: None, index: 0, open: None, following: true, full: false, scroll: 0, top: 0, clicked: None, owners: Vec::new(), view_h: 0 }
     }
 
     fn items<'a>(&self, ui: &Ui, s: &'a Session) -> Vec<Item<'a>> {
@@ -876,6 +883,9 @@ impl TimelineView {
             if (shell && self.show[2]) || (!shell && self.show[3]) {
                 out.push(Item::Call(call));
             }
+        }
+        if self.show[4] {
+            out.extend(s.prompts.iter().map(Item::Prompt));
         }
         out.sort_by(|a, b| b.at().total_cmp(&a.at()));
         ui.filtered(out)
@@ -939,6 +949,16 @@ impl TimelineView {
                 }
                 segs.push(flex(&task.name, none()));
                 segs.push(task_status(task, now));
+            }
+            Item::Prompt(p) => {
+                segs.push(seg("▸", green().add_modifier(ratatui::style::Modifier::BOLD), 2));
+                if wide {
+                    segs.push(seg("you", dim(), 6));
+                }
+                segs.push(flex(prompt_line(p), bold()));
+                if wide {
+                    segs.push(turn_seg(p, 9));
+                }
             }
             Item::Call(call) => {
                 segs.push(seg("❯", blue(), 2));
@@ -1031,6 +1051,16 @@ impl TimelineView {
                 (body, text, if call.failed() { red() } else { none() })
             }
             Item::Task(task) => (Vec::new(), if task.text.is_empty() { "(empty)".into() } else { task.text.clone() }, none()),
+            Item::Prompt(p) => {
+                let body = crate::text::wrap(&p.text, inner).iter().take(4).map(|l| plain_bg(inner, l, none(), cmd_bg())).collect();
+                let said: Vec<&str> = p.lines.iter().filter(|l| l.starts_with('◆')).map(String::as_str).collect();
+                let text = match said.last() {
+                    Some(last) => last.to_string(),
+                    None if prompt_running(p) => "(working)".into(),
+                    None => "(no reply)".into(),
+                };
+                (body, text, none())
+            }
             Item::File(f) => {
                 if f.is_image {
                     return gutter(vec![plain(inner, "image · o to view", dim())]);
@@ -1076,7 +1106,7 @@ impl View for TimelineView {
         let i = self.selected(ui, &items);
         let mut chips = Vec::new();
         let mut x = 0;
-        for (n, name) in ["files", "tasks", "shell", "other calls"].iter().enumerate() {
+        for (n, name) in ["files", "tasks", "shell", "other calls", "prompts"].iter().enumerate() {
             chips.push(seg(SHOW_KEYS[n], blue(), 1));
             chips.push(seg(format!(" {name}  "), if self.show[n] { none() } else { dim() }, width(name) + 3));
             // full screen the keys leave these alone, and so do clicks
@@ -1142,7 +1172,7 @@ impl View for TimelineView {
         let hints: &[(&str, &str)] = if self.full {
             &[("h", "back"), ("j/k", "scroll"), ("n/p", "command"), ("e", "failure"), ("= # u", "format"), ("?", "keys")]
         } else {
-            &[("j/k", "move"), ("⏎", "expand"), ("l", "open"), ("h", "collapse"), ("n/p", "command"), ("e", "failure"), ("f t s c", "filter"), ("v", "view"), ("?", "keys")]
+            &[("j/k", "move"), ("⏎", "expand"), ("l", "open"), ("h", "collapse"), ("n/p", "command"), ("e", "failure"), ("f t s c m", "filter"), ("v", "view"), ("?", "keys")]
         };
         lines.push(ui.footer(cells, hints));
         lines
@@ -1391,7 +1421,7 @@ mod tests {
         assert_eq!((b.source, b.focus), (2, 0));
         // and the dot drawn there is the one picked
         let line: String = b.render(&mut ui, &s, 80, 30)[1].spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(line.ends_with("··●········"), "{line}");
+        assert!(line.ends_with("··●·········"), "{line}");
     }
 
     #[test]
@@ -1593,7 +1623,7 @@ mod tests {
         let s = with_files(&ages(3));
         let mut b = ColumnsView::new();
         b.focus = 0;
-        // 12 rows: header, borders, footer leave 8 for the 11 sources
+        // 12 rows: header, borders, footer leave 8 for the 12 sources
         assert_full_width(&b.render(&mut ui, &s, 120, 12), 120);
         let bar = bars(&ui).into_iter().find(|b| b.scrolls == Scroll::Sources).unwrap();
         assert_eq!((bar.y, bar.view, bar.total), (2, 8, SOURCES.len()));
@@ -1601,12 +1631,12 @@ mod tests {
         b.handle(&mut ui, &s, "G");
         ui.hits.clear();
         let lines = b.render(&mut ui, &s, 120, 12);
-        assert_eq!(b.src_top, 3);
+        assert_eq!(b.src_top, 4);
         let last: String = lines[9].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(last.contains("denied"), "{last}");
-        // a click on the top row picks the fourth source, not the first
+        assert!(last.contains("PROMPTS"), "{last}");
+        // a click on the top row picks the fifth source, not the first
         b.mouse(&mut ui, &s, click(5, 2));
-        assert_eq!(b.source, 3);
+        assert_eq!(b.source, 4);
         // the scrollbar's track: a page up brings the first sources back, the pick comes along
         b.source = 10;
         ui.hits.clear();

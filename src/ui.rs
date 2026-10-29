@@ -5,12 +5,12 @@
 //! cut a wide character at the right edge.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::data::{Call, Family, FileItem, PREVIEW_BYTES, Session, TaskItem, TaskKind, Verdict, read_text};
+use crate::data::{Call, Family, FileItem, PREVIEW_BYTES, Prompt, Session, TaskItem, TaskKind, Verdict, read_text};
 use crate::render::{self, Logical};
 use crate::text::{char_width, fit, human_age, human_duration, human_size, hms, now, one_line, sanitize, width, wrap, wrap_words, ymd};
 
@@ -118,12 +118,13 @@ pub fn on_rail(line: Line<'static>, phase: usize) -> Line<'static> {
 
 // ------------------------------------------------------------------ items
 
-/// Anything a list shows: a scratchpad file, a task, a tool call.
+/// Anything a list shows: a scratchpad file, a task, a tool call, a prompt.
 #[derive(Clone, Copy)]
 pub enum Item<'a> {
     File(&'a FileItem),
     Task(&'a TaskItem),
     Call(&'a Call),
+    Prompt(&'a Prompt),
 }
 
 impl Item<'_> {
@@ -132,6 +133,7 @@ impl Item<'_> {
             Item::File(f) => f.key(),
             Item::Task(t) => t.key(),
             Item::Call(c) => c.key(),
+            Item::Prompt(p) => p.key(),
         }
     }
 
@@ -140,6 +142,7 @@ impl Item<'_> {
             Item::File(f) => f.mtime,
             Item::Task(t) => t.mtime,
             Item::Call(c) => c.started,
+            Item::Prompt(p) => p.at,
         }
     }
 
@@ -148,7 +151,7 @@ impl Item<'_> {
         match self {
             Item::Call(c) => c.failed(),
             Item::Task(t) => t.exit.is_some_and(|e| e != 0),
-            Item::File(_) => false,
+            Item::File(_) | Item::Prompt(_) => false,
         }
     }
 
@@ -158,6 +161,7 @@ impl Item<'_> {
             Item::File(f) => &f.rel,
             Item::Task(t) => &t.name,
             Item::Call(c) => &c.summary,
+            Item::Prompt(p) => &p.text,
         }
     }
 }
@@ -923,7 +927,106 @@ pub fn item_row(item: Item, cells: usize, now: f64, gate: bool, bg: Style) -> Li
         Item::Call(c) => call_row(c, cells, gate, bg),
         Item::File(f) => file_row(f, cells, now, bg),
         Item::Task(t) => task_row(t, cells, now, bg),
+        Item::Prompt(p) => prompt_row(p, cells, gate, bg),
     }
+}
+
+/// A turn still going: the latest prompt, before Claude's final reply.
+pub fn prompt_running(p: &Prompt) -> bool {
+    p.until.is_none() && !p.done
+}
+
+/// How long the turn took, or a spinner while it runs; `cells` wide, right-aligned.
+pub fn turn_seg(p: &Prompt, cells: usize) -> Seg {
+    if prompt_running(p) { seg_r(format!("{} {}", spin(), human_age(p.took())), yellow(), cells) } else { seg_r(human_duration(Some(p.took() * 1000.0)), dim(), cells) }
+}
+
+/// A prompt lined up with the calls: what you sent where a call has its command.
+pub fn prompt_row(p: &Prompt, cells: usize, gate: bool, bg: Style) -> Line<'static> {
+    let narrow = cells < 70;
+    let mut segs = vec![seg(hms(p.at), dim(), 9), seg("▸ you", green().add_modifier(Modifier::BOLD), STATUS)];
+    if gate && !narrow {
+        segs.push(seg("", none(), 5));
+    }
+    if !narrow {
+        segs.push(turn_seg(p, 7));
+        segs.push(seg(" ", none(), 1));
+    }
+    segs.push(seg("", none(), 2));
+    segs.push(flex(prompt_line(p), bold()));
+    compose(cells, &segs, bg)
+}
+
+/// A prompt on one line, its images counted.
+pub fn prompt_line(p: &Prompt) -> String {
+    let images = match p.images {
+        0 => String::new(),
+        1 => "[image] ".into(),
+        n => format!("[{n} images] "),
+    };
+    format!("{images}{}", one_line(&p.text))
+}
+
+/// 12.3k tokens and the like.
+fn tokens(n: u64) -> String {
+    if n < 1000 { n.to_string() } else if n < 1_000_000 { format!("{:.1}k", n as f64 / 1000.0) } else { format!("{:.1}M", n as f64 / 1_000_000.0) }
+}
+
+/// What a prompt started: what was sent, then how the turn went, then the turn itself.
+pub fn prompt_detail(p: &Prompt, cells: usize, s: &Session) -> Vec<Line<'static>> {
+    let calls = s.turn_calls(p);
+    let failed = calls.iter().filter(|c| c.failed() && !c.refused()).count();
+    let refused = calls.iter().filter(|c| c.refused()).count();
+    let status = if prompt_running(p) {
+        span(format!("{} running {}", spin(), human_age(p.took())), yellow())
+    } else {
+        span(format!("took {}", human_duration(Some(p.took() * 1000.0))), none())
+    };
+    let meta = vec![
+        // numbered in the session, whatever list it was picked from
+        vec![span(format!("prompt {}/{}", s.prompts.iter().position(|x| x.id == p.id).map_or(0, |n| n + 1), s.prompts.len()), bold())],
+        vec![span(hms(p.at), none())],
+        vec![span(ymd(p.at), none())],
+        vec![status],
+    ];
+    let mut turn = vec![vec![span(format!("{} call{}", calls.len(), if calls.len() == 1 { "" } else { "s" }), none())]];
+    if failed > 0 {
+        turn.push(vec![span(format!("✗ {failed} failed"), red())]);
+    }
+    if refused > 0 {
+        turn.push(vec![span(format!("⊘ {refused} denied"), red())]);
+    }
+    if p.output_tokens() > 0 {
+        turn.push(vec![span(format!("{} tokens out", tokens(p.output_tokens())), dim())]);
+        turn.push(vec![span(format!("context {}", tokens(p.context_tokens)), dim())]);
+    }
+    let mut lines = vec![raw(cells, joined(meta)), raw(cells, joined(turn))];
+    let mut written: Vec<&str> = Vec::new();
+    for c in &calls {
+        if let Some(path) = c.input["file_path"].as_str().or(c.input["notebook_path"].as_str()) {
+            if matches!(c.tool.as_str(), "Write" | "Edit" | "MultiEdit" | "NotebookEdit") && !c.failed() && !written.contains(&path) {
+                written.push(path);
+            }
+        }
+    }
+    if !written.is_empty() {
+        let names: Vec<String> = written.iter().map(|w| Path::new(w).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| w.to_string())).collect();
+        lines.extend(hanging(cells, "✎ ", &names.join("  "), dim()));
+    }
+    lines.push(rule(cells, "you", "y copy", dim()));
+    if p.images > 0 {
+        lines.push(plain(cells, &format!("[{} image{}]", p.images, if p.images == 1 { "" } else { "s" }), magenta()));
+    }
+    lines.extend(wrapped(cells, &p.text, none()));
+    lines.push(rule(cells, "turn (condensed)", &format!("{} lines", p.lines.len()), dim()));
+    if p.lines.is_empty() {
+        lines.push(plain(cells, if prompt_running(p) { "(working)" } else { "(nothing)" }, dim()));
+    }
+    for line in &p.lines {
+        let style = if line.starts_with("◆") { none() } else { dim() };
+        lines.extend(wrapped(cells, line, style));
+    }
+    lines
 }
 
 // ------------------------------------------------------------------ details
@@ -1051,6 +1154,7 @@ pub fn detail_of(ui: &mut Ui, item: Option<Item>, index: usize, total: usize, ce
         Some(Item::Call(c)) => (call_detail(ui, c, index, total, cells, s), None),
         Some(Item::File(f)) => file_detail(ui, f, cells, now),
         Some(Item::Task(t)) => (task_detail(t, cells, now), None),
+        Some(Item::Prompt(p)) => (prompt_detail(p, cells, s), None),
         None => (vec![plain(cells, "nothing selected", dim())], None),
     }
 }

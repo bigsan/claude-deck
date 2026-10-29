@@ -432,6 +432,132 @@ impl Call {
     }
 }
 
+/// Something the user sent, and the turn it started: what Claude said and ran until
+/// the next one.
+#[derive(Clone, Debug)]
+pub struct Prompt {
+    pub id: String,
+    pub text: String,
+    pub images: usize,
+    pub at: f64,
+    /// when the next prompt came, which ends this turn's share of the calls
+    pub until: Option<f64>,
+    /// the turn's latest record
+    pub last: f64,
+    /// Claude's reply was final, or the turn was interrupted
+    pub done: bool,
+    /// the turn as lines: ◆ what Claude said, ❯ the tools it ran
+    pub lines: Vec<String>,
+    /// tokens Claude wrote, per message (a message is spread over several records)
+    output: HashMap<String, u64>,
+    /// tokens the turn's latest request carried
+    pub context_tokens: u64,
+}
+
+const TURN_LINES: usize = 400;
+const REPLY_CHARS: usize = 4000;
+
+impl Prompt {
+    pub fn key(&self) -> String {
+        format!("prompt:{}", self.id)
+    }
+
+    pub fn output_tokens(&self) -> u64 {
+        self.output.values().sum()
+    }
+
+    /// The turn so far, or all of it once done.
+    pub fn took(&self) -> f64 {
+        (self.last - self.at).max(0.0)
+    }
+
+    /// The prompt in a user record, as typed: a slash command with its arguments, a
+    /// `!` command, pasted text without its wrapper. None for everything else a user
+    /// record carries: tool results, notes Claude Code adds, a command's echoed output.
+    fn read(record: &Value) -> Option<Prompt> {
+        if record["type"] != "user" || record["isMeta"].as_bool() == Some(true) {
+            return None;
+        }
+        let id = record["promptId"].as_str()?;
+        let (text, images) = match &record["message"]["content"] {
+            Value::String(s) => (s.clone(), 0),
+            Value::Array(blocks) => {
+                if blocks.iter().any(|b| b["type"] == "tool_result") {
+                    return None;
+                }
+                let text = blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
+                (text, blocks.iter().filter(|b| b["type"] == "image").count())
+            }
+            _ => return None,
+        };
+        let t = text.trim();
+        let tag = |name: &str| t.split(&format!("<{name}>")).nth(1).and_then(|r| r.split(&format!("</{name}>")).next()).map(str::trim);
+        let text = if let Some(name) = tag("command-name") {
+            format!("{name} {}", tag("command-args").unwrap_or("")).trim_end().to_string()
+        } else if let Some(command) = tag("bash-input") {
+            format!("! {command}")
+        } else if t.starts_with("<pasted_content") {
+            PASTED.replace_all(t, "").trim().to_string()
+        } else if t.starts_with('<') || t.starts_with("[Request interrupted") {
+            return None;
+        } else {
+            t.to_string()
+        };
+        if text.is_empty() && images == 0 {
+            return None;
+        }
+        let at = parse_ts(record["timestamp"].as_str().unwrap_or(""));
+        Some(Prompt { id: id.to_string(), text, images, at, until: None, last: at, done: false, lines: Vec::new(), output: HashMap::new(), context_tokens: 0 })
+    }
+
+    /// Take in a record of this turn.
+    fn follow(&mut self, record: &Value, at: f64) {
+        self.last = self.last.max(at);
+        let message = &record["message"];
+        if record["type"] == "user" {
+            if let Value::Array(blocks) = &message["content"] {
+                if blocks.iter().any(|b| b["text"].as_str().is_some_and(|t| t.starts_with("[Request interrupted"))) {
+                    self.done = true;
+                    self.push("⌁ interrupted".into());
+                }
+            }
+            return;
+        }
+        if record["type"] != "assistant" {
+            return;
+        }
+        for block in message["content"].as_array().into_iter().flatten() {
+            match block["type"].as_str() {
+                // what Claude said is what a turn is read for: kept as written, lines and all
+                Some("text") => self.push(format!("◆ {}", clip(block["text"].as_str().unwrap_or("").trim(), REPLY_CHARS))),
+                Some("tool_use") => {
+                    let name = block["name"].as_str().unwrap_or("?");
+                    self.push(format!("  ❯ {name} {}", clip(&summarize(name, &block["input"]), 200)));
+                }
+                _ => {}
+            }
+        }
+        let usage = &message["usage"];
+        if usage.is_object() {
+            let n = |k: &str| usage[k].as_u64().unwrap_or(0);
+            self.output.insert(message["id"].as_str().unwrap_or("").to_string(), n("output_tokens"));
+            self.context_tokens = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+        }
+        // a background task's notice can wake Claude again after its reply, with no prompt
+        if let Some(reason) = message["stop_reason"].as_str() {
+            self.done = reason == "end_turn";
+        }
+    }
+
+    fn push(&mut self, line: String) {
+        if self.lines.len() < TURN_LINES {
+            self.lines.push(line);
+        }
+    }
+}
+
+static PASTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"</?pasted_content[^>]*>").unwrap());
+
 fn result_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
@@ -510,11 +636,25 @@ impl Transcript {
         Transcript { tail: JsonlTail::new(path), agent }
     }
 
-    pub fn feed(&mut self, calls: &mut HashMap<String, Call>) -> bool {
+    /// Take in what was appended: tool calls into `calls`, and, from the main transcript,
+    /// prompts and their turns into `prompts`.
+    pub fn feed(&mut self, calls: &mut HashMap<String, Call>, prompts: &mut Vec<Prompt>) -> bool {
         let mut changed = false;
         for record in self.tail.read() {
-            let Some(blocks) = record["message"]["content"].as_array() else { continue };
             let at = parse_ts(record["timestamp"].as_str().unwrap_or(""));
+            if self.agent.is_none() {
+                if let Some(prompt) = Prompt::read(&record) {
+                    if let Some(previous) = prompts.last_mut() {
+                        previous.until = Some(prompt.at);
+                    }
+                    prompts.push(prompt);
+                    changed = true;
+                } else if let Some(turn) = prompts.last_mut() {
+                    turn.follow(&record, at);
+                    changed = true;
+                }
+            }
+            let Some(blocks) = record["message"]["content"].as_array() else { continue };
             for block in blocks {
                 match block["type"].as_str() {
                     Some("tool_use") => {
@@ -659,6 +799,8 @@ pub struct Session {
     /// output files of foreground commands still running
     pub live: Vec<TaskItem>,
     pub calls: HashMap<String, Call>,
+    /// what the user sent, oldest first
+    pub prompts: Vec<Prompt>,
     transcripts: Vec<(PathBuf, Transcript)>,
     gate: JsonlTail,
     gate_lines: Vec<Value>,
@@ -681,6 +823,7 @@ impl Session {
             tasks: Vec::new(),
             live: Vec::new(),
             calls: HashMap::new(),
+            prompts: Vec::new(),
             transcripts,
             gate,
             gate_lines: Vec::new(),
@@ -716,7 +859,7 @@ impl Session {
         self.add_subagents();
         let mut changed = false;
         for (_, transcript) in &mut self.transcripts {
-            changed |= transcript.feed(&mut self.calls);
+            changed |= transcript.feed(&mut self.calls, &mut self.prompts);
         }
         if self.light && changed {
             for call in self.calls.values_mut().filter(|c| !c.output.is_empty()) {
@@ -748,6 +891,9 @@ impl Session {
             (&t.name, t.size, t.mtime.to_bits()).hash(&mut h);
         }
         self.calls.len().hash(&mut h);
+        if let Some(p) = self.prompts.last() {
+            (self.prompts.len(), p.lines.len(), p.done, p.last.to_bits()).hash(&mut h);
+        }
         self.calls.values().filter(|c| c.ended.is_some()).count().hash(&mut h);
         self.gate_lines.len().hash(&mut h);
         h.finish()
@@ -797,6 +943,17 @@ impl Session {
     /// Calls in the order they were read.
     pub fn calls_in_order(&self) -> Vec<&Call> {
         let mut calls: Vec<&Call> = self.calls.values().collect();
+        calls.sort_by_key(|c| c.seq);
+        calls
+    }
+
+    pub fn prompts_newest(&self) -> impl Iterator<Item = &Prompt> {
+        self.prompts.iter().rev()
+    }
+
+    /// The calls a prompt's turn made, subagents' too.
+    pub fn turn_calls(&self, prompt: &Prompt) -> Vec<&Call> {
+        let mut calls: Vec<&Call> = self.calls.values().filter(|c| c.started >= prompt.at && prompt.until.is_none_or(|u| c.started < u)).collect();
         calls.sort_by_key(|c| c.seq);
         calls
     }
@@ -902,6 +1059,58 @@ mod tests {
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
         std::io::Write::write_all(&mut f, b": 2}\n").unwrap();
         assert_eq!(tail.read(), vec![json!({ "b": 2 })]);
+    }
+
+    #[test]
+    fn prompts_start_turns_that_gather_what_claude_said_and_ran() {
+        let dir = tempdir("prompts");
+        let session = dir.join("slug").join("sess");
+        fs::create_dir_all(&session).unwrap();
+        let ts = |s: u32| format!("2026-10-22T06:00:{s:02}.000Z");
+        let user = |s: u32, content: Value, pid: bool| {
+            let mut r = json!({ "type": "user", "timestamp": ts(s), "message": { "role": "user", "content": content } });
+            if pid {
+                r["promptId"] = json!(format!("p{s}"));
+            }
+            r
+        };
+        let said = |s: u32, id: &str, content: Value, stop: &str, out: u64| {
+            json!({ "type": "assistant", "timestamp": ts(s), "message": { "id": id, "role": "assistant", "content": content, "stop_reason": stop,
+                "usage": { "input_tokens": 10, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 0, "output_tokens": out } } })
+        };
+        let rows = [
+            // Claude Code's own notes and echoes are not prompts
+            json!({ "type": "user", "isMeta": true, "timestamp": ts(0), "message": { "content": "<local-command-caveat>…</local-command-caveat>" } }),
+            user(1, json!("<command-name>/clear</command-name>"), false),
+            user(2, json!("fix the build"), true),
+            said(3, "m1", json!([{ "type": "text", "text": "Looking.\n\n- one" }]), "tool_use", 5),
+            // the same message's next block repeats its usage: counted once
+            said(3, "m1", json!([{ "type": "tool_use", "id": "t1", "name": "Bash", "input": { "command": "cargo build" } }]), "tool_use", 5),
+            json!({ "type": "user", "timestamp": ts(9), "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }] } }),
+            said(12, "m2", json!([{ "type": "text", "text": "Fixed." }]), "end_turn", 40),
+            user(13, json!("<task-notification><task-id>b1</task-id></task-notification>"), true),
+            user(20, json!("<command-name>/review</command-name>\n<command-args>T12</command-args>"), true),
+            user(30, json!([{ "type": "image", "source": {} }, { "type": "text", "text": "<pasted_content id=\"1\">a\nb</pasted_content>" }]), true),
+            user(31, json!([{ "type": "text", "text": "[Request interrupted by user]" }]), true),
+            user(40, json!("<bash-input>git status</bash-input>"), true),
+            said(41, "m3", json!([{ "type": "tool_use", "id": "t2", "name": "Read", "input": { "file_path": "/x" } }]), "tool_use", 1),
+        ];
+        let transcript = dir.join("sess.jsonl");
+        fs::write(&transcript, rows.iter().map(|r| r.to_string() + "\n").collect::<String>()).unwrap();
+        let mut s = Session::new(session, Some(transcript));
+        assert!(s.refresh());
+        let texts: Vec<&str> = s.prompts.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["fix the build", "/review T12", "a\nb", "! git status"]);
+        let first = &s.prompts[0];
+        assert_eq!(first.lines, ["◆ Looking.\n\n- one", "  ❯ Bash cargo build", "◆ Fixed."]);
+        assert_eq!((first.done, first.took(), first.until), (true, 11.0, Some(parse_ts(&ts(20)))));
+        assert_eq!((first.output_tokens(), first.context_tokens), (45, 1010));
+        assert_eq!(s.turn_calls(first).iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["t1"]);
+        // the pasted prompt with its image was interrupted; the last one is still going
+        assert_eq!((s.prompts[2].images, s.prompts[2].done, s.prompts[2].lines.as_slice()), (1, true, &["⌁ interrupted".to_string()][..]));
+        let last = s.prompts.last().unwrap();
+        assert_eq!((last.done, last.until, s.turn_calls(last).len()), (false, None, 1));
+        assert!(!s.refresh());
     }
 
     #[test]

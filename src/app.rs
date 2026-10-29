@@ -274,6 +274,7 @@ impl App {
             Item::Call(c) => c.input["command"].as_str().map(str::to_string).unwrap_or_else(|| c.summary.clone()),
             Item::File(f) => f.path.display().to_string(),
             Item::Task(t) => t.path.display().to_string(),
+            Item::Prompt(p) => p.text.clone(),
         };
         for argv in [&["pbcopy"][..], &["wl-copy"], &["xclip", "-selection", "clipboard"]] {
             let child = std::process::Command::new(argv[0])
