@@ -324,7 +324,7 @@ impl Overview {
             segs.push(seg(" ", none(), 1));
         }
         segs.push(seg(if l.busy { "busy" } else { "idle" }, if l.busy { yellow() } else { dim() }, 5));
-        segs.push(seg_r(human_age(now - row.last()), dim(), 4));
+        segs.push(if l.busy { seg_r(human_age(now - l.status_since), yellow(), 4) } else { seg_r(human_age(now - row.last()), dim(), 4) });
         match &row.stats {
             None => segs.push(seg_r("…", dim(), if narrow { 11 } else { 19 })),
             Some(s) => {
@@ -542,7 +542,7 @@ mod tests {
     use super::*;
 
     fn live(n: usize) -> Live {
-        Live { pid: 1000 + n as i32, session_id: format!("s{n}-0000"), cwd: format!("/p/{n}"), name: format!("session {n}"), busy: false, updated: 0.0, started: 0.0 }
+        Live { pid: 1000 + n as i32, session_id: format!("s{n}-0000"), cwd: format!("/p/{n}"), name: format!("session {n}"), busy: false, updated: 0.0, status_since: 0.0, started: 0.0 }
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub struct Live {
     pub busy: bool,
     /// epoch seconds of the record's last update
     pub updated: f64,
+    /// epoch seconds the status turned what it is, busy or idle
+    pub status_since: f64,
     pub started: f64,
 }
 
@@ -76,6 +78,7 @@ fn parse(record: &Value) -> Option<Live> {
         name: record["name"].as_str().unwrap_or("").to_string(),
         busy: record["status"].as_str() == Some("busy"),
         updated: ms("updatedAt").max(ms("statusUpdatedAt")),
+        status_since: if ms("statusUpdatedAt") > 0.0 { ms("statusUpdatedAt") } else { ms("updatedAt") },
         started: ms("startedAt"),
         session_id,
         cwd,

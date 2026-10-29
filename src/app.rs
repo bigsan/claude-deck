@@ -38,6 +38,11 @@ const BUDGET: f64 = 0.03; // at most ~3% of one core on rescanning
 const IDLE_REDRAW: f64 = 5.0;
 // How often to check whether the followed process moved to another session (/clear).
 const FOLLOW: f64 = 5.0;
+// How often to read whether the followed process is busy; and how often to redraw then,
+// for the spinners and the rail.
+const AGENT_LOOK: f64 = 1.0;
+const BUSY_REDRAW: f64 = 0.1;
+const BUSY_POLL: Duration = Duration::from_millis(50);
 
 static TERMINATED: AtomicBool = AtomicBool::new(false);
 
@@ -141,6 +146,7 @@ pub struct App {
     /// (a lookup is running, what the last one found)
     pid_found: std::sync::Arc<std::sync::Mutex<(bool, Option<Option<i32>>)>>,
     last_follow: f64,
+    last_agent_look: f64,
     /// opened from the list of sessions, which esc and h return to
     nested: bool,
 }
@@ -173,6 +179,7 @@ impl App {
             agent_pane: None,
             pid_found: Default::default(),
             last_follow: now(),
+            last_agent_look: 0.0,
             nested: false,
         }
     }
@@ -217,6 +224,25 @@ impl App {
 
     fn view_letter(&self) -> String {
         VIEWS[self.view..self.view + 1].to_string()
+    }
+
+    /// Whether the followed process is busy, and since when.
+    fn look_at_agent(&mut self) {
+        if now() - self.last_agent_look < AGENT_LOOK {
+            return;
+        }
+        self.last_agent_look = now();
+        let live = self.followed_pid().and_then(record_of);
+        let busy = live.as_ref().filter(|l| l.busy).map(|l| l.status_since);
+        if let (Some(start), None) = (self.ui.agent_busy, busy) {
+            // it just finished: the record says when, or it is gone and that was now
+            let end = live.map(|l| l.status_since).filter(|end| *end >= start).unwrap_or_else(now);
+            self.ui.agent_took = Some(end - start);
+        }
+        if busy != self.ui.agent_busy {
+            self.ui.agent_busy = busy;
+            self.dirty = true;
+        }
     }
 
     /// Switch to the session the followed process is in now, if /clear moved it.
@@ -403,7 +429,7 @@ impl App {
     fn busy(&self) -> bool {
         let now = now();
         let s = &self.session;
-        s.files.iter().take(50).any(|f| f.fresh(now)) || s.tasks.iter().any(|t| t.running(now)) || s.calls.values().any(|c| c.pending())
+        self.ui.agent_busy.is_some() || s.files.iter().take(50).any(|f| f.fresh(now)) || s.tasks.iter().any(|t| t.running(now)) || s.calls.values().any(|c| c.pending())
     }
 
     fn frame(&mut self, cells: usize, height: usize) -> Vec<Line<'static>> {
@@ -416,13 +442,21 @@ impl App {
             self.help = help;
             lines
         } else {
-            self.views[self.view].render(&mut self.ui, &self.session, cells, height)
+            let mut lines = self.views[self.view].render(&mut self.ui, &self.session, cells, height);
+            // the rail runs along the first rule under the header
+            if self.ui.agent_busy.is_some() {
+                if let Some(rule) = lines.iter_mut().skip(1).find(|l| l.spans.iter().any(|s| s.content.contains("──"))) {
+                    *rule = on_rail(std::mem::take(rule), rail_phase());
+                }
+            }
+            lines
         }
     }
 
     /// Rescan when due; true when the screen should be redrawn.
     fn tick(&mut self) -> bool {
         self.follow();
+        self.look_at_agent();
         let t = now();
         if t - self.last_scan >= self.rescan_interval() {
             self.rescan();
@@ -635,13 +669,14 @@ impl Deck {
             }
             dirty |= self.tick();
             let t = now();
-            if dirty || t - last_draw > if self.busy() { 0.5 } else { IDLE_REDRAW } {
+            let busy = self.busy();
+            if dirty || t - last_draw > if busy { BUSY_REDRAW } else { IDLE_REDRAW } {
                 self.draw(terminal)?;
                 dirty = false;
                 last_draw = t;
             }
             // an image waiting to be sent is looked at again soon
-            let wait = if self.kitty.pending() { Duration::from_millis(40) } else { POLL };
+            let wait = if self.kitty.pending() { Duration::from_millis(40) } else if busy { BUSY_POLL } else { POLL };
             if !event::poll(wait)? {
                 dirty |= self.kitty.pending();
                 continue;

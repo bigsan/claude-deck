@@ -12,9 +12,11 @@ use ratatui::text::{Line, Span};
 
 use crate::data::{Call, Family, FileItem, PREVIEW_BYTES, Session, TaskItem, TaskKind, Verdict, read_text};
 use crate::render::{self, Logical};
-use crate::text::{fit, human_age, human_duration, human_size, hms, now, one_line, sanitize, width, wrap, wrap_words, ymd};
+use crate::text::{char_width, fit, human_age, human_duration, human_size, hms, now, one_line, sanitize, width, wrap, wrap_words, ymd};
 
-pub const SPIN: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+// Three of the four middle braille dots, the gap going round clockwise: the middle
+// rows sit level with lowercase letters, where the top ones (⠋) stand above them.
+pub const SPIN: [char; 4] = ['⠴', '⠦', '⠖', '⠲'];
 pub const FAMILIES: [&str; 4] = ["shell", "file", "other", "all"];
 
 pub fn none() -> Style {
@@ -55,7 +57,63 @@ pub fn cmd_bg() -> Style {
 }
 
 pub fn spin() -> char {
-    SPIN[(now() * 8.0) as usize % SPIN.len()]
+    // one turn a second
+    SPIN[(now() * 4.0) as usize % SPIN.len()]
+}
+
+// While the agent works, pairs of dots (● ahead, • behind) run right along the rule
+// under the header, one cell per RAIL_STEP seconds. The gaps between pairs differ and
+// repeat only every sum(RAIL_GAPS) cells, so the spacing never looks regular.
+const RAIL_GAPS: [usize; 7] = [17, 29, 11, 23, 35, 14, 26];
+pub const RAIL_STEP: f64 = 0.15;
+
+pub fn rail_phase() -> usize {
+    (now() / RAIL_STEP) as usize
+}
+
+/// The dot on each of `cells` cells at step `phase`, if any. A pair runs off the right
+/// end, its trailing dot last, and comes back in at the left.
+pub fn rail(phase: usize, cells: usize) -> Vec<Option<char>> {
+    let total: usize = RAIL_GAPS.iter().sum();
+    let mut out = vec![None; cells];
+    let mut at = 0;
+    for gap in RAIL_GAPS {
+        let mut head = (at + phase % total) % total;
+        while head <= cells {
+            if head > 0 {
+                out[head - 1] = Some('•');
+            }
+            if head < cells {
+                out[head] = Some('●');
+            }
+            head += total;
+        }
+        at += gap;
+    }
+    out
+}
+
+/// `line` with the rail's dots on whichever of its cells are ─ (corners and titles stay).
+pub fn on_rail(line: Line<'static>, phase: usize) -> Line<'static> {
+    let lit = rail(phase, line.spans.iter().map(|s| width(&s.content)).sum());
+    let lit_style = yellow().add_modifier(Modifier::BOLD);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut x = 0;
+    for span in &line.spans {
+        for c in span.content.chars() {
+            let (glyph, style) = match lit.get(x).copied().flatten() {
+                // a rule is dim, and patching keeps that: the dots drop it
+                Some(dot) if c == '─' => (dot, span.style.remove_modifier(Modifier::DIM).patch(lit_style)),
+                _ => (c, span.style),
+            };
+            match spans.last_mut() {
+                Some(last) if last.style == style => last.content.to_mut().push(glyph),
+                _ => spans.push(Span::styled(glyph.to_string(), style)),
+            }
+            x += char_width(c);
+        }
+    }
+    Line { spans, ..line }
 }
 
 // ------------------------------------------------------------------ items
@@ -328,6 +386,10 @@ pub struct Ui {
     pub status_until: f64,
     pub label: String,
     pub view_name: &'static str,
+    /// since when the agent has been busy, while it is
+    pub agent_busy: Option<f64>,
+    /// seconds the agent's last busy stretch took, once it is idle
+    pub agent_took: Option<f64>,
     /// (image path, (col, row, cols, rows)) the current frame wants shown
     pub image_want: Option<(PathBuf, (usize, usize, usize, usize))>,
     /// where the current frame put what a click can land on
@@ -350,6 +412,8 @@ impl Ui {
             status: String::new(),
             status_until: 0.0,
             label,
+            agent_busy: None,
+            agent_took: None,
             view_name: "",
             image_want: None,
             hits: Vec::new(),
@@ -412,6 +476,13 @@ impl Ui {
         let mut segs = vec![seg("claude ", magenta().add_modifier(Modifier::BOLD), 7), flex(&self.label, none())];
         if !s.has_gate && cells >= 70 {
             segs.push(seg("no gate.jsonl ", dim(), 14));
+        }
+        if let Some(since) = self.agent_busy {
+            let busy = format!("{} busy {} ", spin(), human_age(now - since));
+            segs.push(seg(busy.clone(), yellow(), width(&busy)));
+        } else if let Some(took) = self.agent_took {
+            let took = format!("took {} ", human_duration(Some(took * 1000.0)));
+            segs.push(seg(took.clone(), dim(), width(&took)));
         }
         segs.push(seg(format!("{} ", self.view_name), blue(), width(self.view_name) + 1));
         let busy = if running > 0 { spin() } else { '⚙' };
@@ -1137,6 +1208,61 @@ mod tests {
         assert_eq!(width(&visible(&line)), 20);
         assert!(visible(&line).ends_with("  3s"));
         assert_eq!(line.spans[1].style.bg, Some(Color::Indexed(237)));
+    }
+
+    #[test]
+    fn rail_pairs_run_right_with_uneven_gaps() {
+        for phase in [0, 7, 40, 154, 155, 1000] {
+            let lit = rail(phase, 40);
+            assert_eq!(lit.len(), 40);
+            for (x, dot) in lit.iter().enumerate() {
+                // every head has its dot behind it, unless that dot is off the left end
+                if *dot == Some('●') && x > 0 {
+                    assert_eq!(lit[x - 1], Some('•'), "phase {phase} cell {x}");
+                }
+            }
+            // a step later everything sits one cell to the right
+            let next = rail(phase + 1, 40);
+            assert_eq!(next[1..], lit[..39], "phase {phase}");
+        }
+        let heads: Vec<usize> = rail(0, 120).iter().enumerate().filter(|(_, d)| **d == Some('●')).map(|(x, _)| x).collect();
+        let gaps: Vec<usize> = heads.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.windows(2).any(|w| w[0] != w[1]), "{gaps:?}");
+    }
+
+    #[test]
+    fn on_rail_dots_only_the_dashes() {
+        let line = compose(30, &[seg("┌─ list ", blue(), 8), seg("─".repeat(21), blue(), 21), seg("┐", blue(), 1)], none());
+        for phase in 0..200 {
+            let railed = visible(&on_rail(line.clone(), phase));
+            assert_eq!(width(&railed), 30);
+            assert!(railed.starts_with('┌') && railed.ends_with('┐') && railed.contains(" list "), "{railed}");
+        }
+        assert!((0..200).any(|p| visible(&on_rail(line.clone(), p)).contains("•●")));
+        // on a dim rule the dots are not dim
+        let dim_rule = rule(30, "list", "", dim());
+        let railed = (0..200).map(|p| on_rail(dim_rule.clone(), p)).find(|l| visible(l).contains('●')).unwrap();
+        let dot = railed.spans.iter().find(|s| s.content.contains('●')).unwrap();
+        assert!(!dot.style.add_modifier.contains(Modifier::DIM) && dot.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn header_says_how_long_the_agent_has_been_busy() {
+        let mut ui = Ui::new("deck".into());
+        let s = Session::new(PathBuf::from("/nonexistent"), None);
+        assert!(!visible(&ui.header(&s, 80)).contains("busy"));
+        ui.agent_busy = Some(now() - 12.0);
+        let header = visible(&ui.header(&s, 80));
+        assert_eq!(width(&header), 80);
+        assert!(header.contains(" busy 12s "), "{header}");
+        // done, it keeps what the stretch took until the next one
+        ui.agent_busy = None;
+        ui.agent_took = Some(252.0);
+        let header = visible(&ui.header(&s, 80));
+        assert_eq!(width(&header), 80);
+        assert!(header.contains(" took 4m12s ") && !header.contains("busy"), "{header}");
+        ui.agent_busy = Some(now());
+        assert!(!visible(&ui.header(&s, 80)).contains("took"));
     }
 
     #[test]
