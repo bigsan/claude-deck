@@ -9,7 +9,7 @@
 
 id = "bigsan.claude-deck"
 name = "Claude Deck"
-version = "0.2.2"
+version = "0.3.0"
 min_herdr_version = "0.9.0"
 description = "A Claude Code session's scratchpad, tasks and tool calls beside it, and every running session in one list."
 platforms = ["macos", "linux"]
