@@ -150,6 +150,21 @@ pub fn wrap(text: &str, cells: usize) -> Vec<String> {
     out
 }
 
+/// Wrap `text` at `cells` terminal cells between words; a word wider than that gets a row of its own.
+pub fn wrap_words(text: &str, cells: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    for word in text.split(' ') {
+        match rows.last_mut() {
+            Some(row) if width(row) + 1 + width(word) <= cells => {
+                row.push(' ');
+                row.push_str(word);
+            }
+            _ => rows.push(word.to_string()),
+        }
+    }
+    rows
+}
+
 /// Several lines as one: each run of newlines (and the space around it) becomes ` ⏎ `.
 pub fn one_line(text: &str) -> String {
     let parts: Vec<&str> = text.trim().split('\n').map(str::trim).filter(|p| !p.is_empty()).collect();

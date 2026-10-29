@@ -286,7 +286,7 @@ impl App {
         let back: &[(&str, &str)] = if self.nested { &[("esc h", "back to all sessions")] } else { &[] };
         let mouse: &[(&str, &str)] = if mouse_on() { &[("mouse", "wheel moves / scrolls · click picks · double-click opens · scrollbar: click pages, drag")] } else { &[] };
         for (key, what) in view.help().iter().chain([("", "")].iter()).chain(back.iter()).chain(common.iter()).chain(mouse.iter()) {
-            lines.push(compose(cells, &[seg(format!("  {key}"), yellow(), 14), flex(*what, dim())], none()));
+            lines.extend(help_row(cells, key, what));
         }
         lines
     }
@@ -469,10 +469,10 @@ impl Deck {
         let mut lines = vec![rule(cells, "keys · all sessions", VERSION, dim())];
         let mouse: &[(&str, &str)] = if mouse_on() { &[("mouse", "wheel moves, or scrolls the preview under it · click picks · double-click opens · scrollbar: click pages, drag")] } else { &[] };
         for (key, what) in o.help().iter().chain(mouse.iter()) {
-            lines.push(compose(cells, &[seg(format!("  {key}"), yellow(), 14), flex(*what, dim())], none()));
+            lines.extend(help_row(cells, key, what));
         }
         lines.push(blank(cells));
-        lines.push(plain(cells, "  ⏸ waiting for a permission answer · busy · idle; waiting sessions come first", dim()));
+        lines.extend(hanging(cells, "  ⏸ ", "waiting for a permission answer · busy · idle; waiting sessions come first", dim()));
         lines
     }
 

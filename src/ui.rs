@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 
 use crate::data::{Call, Family, FileItem, PREVIEW_BYTES, Session, TaskItem, TaskKind, Verdict, read_text};
 use crate::render::{self, Logical};
-use crate::text::{fit, human_age, human_duration, human_size, hms, now, one_line, sanitize, width, wrap, ymd};
+use crate::text::{fit, human_age, human_duration, human_size, hms, now, one_line, sanitize, width, wrap, wrap_words, ymd};
 
 pub const SPIN: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 pub const FAMILIES: [&str; 4] = ["shell", "file", "other", "all"];
@@ -660,6 +660,22 @@ pub fn keys_line(cells: usize, pairs: &[(&str, &str)]) -> Line<'static> {
     compose(cells, &segs, none())
 }
 
+/// One key of the help page: the key in its column, what it does word-wrapped beside it.
+pub fn help_row(cells: usize, key: &str, what: &str) -> Vec<Line<'static>> {
+    const KEY: usize = 14;
+    let key = format!("  {key}");
+    let rows = wrap_words(what, cells.saturating_sub(KEY).max(1));
+    rows.iter().enumerate().map(|(i, row)| compose(cells, &[seg(if i == 0 { key.as_str() } else { "" }, yellow(), KEY), flex(row.as_str(), dim())], none())).collect()
+}
+
+/// `text` word-wrapped after `lead`, its later rows indented to line up under the first.
+pub fn hanging(cells: usize, lead: &str, text: &str, style: Style) -> Vec<Line<'static>> {
+    let indent = width(lead);
+    let pad = " ".repeat(indent);
+    let rows = wrap_words(text, cells.saturating_sub(indent).max(1));
+    rows.iter().enumerate().map(|(i, row)| plain(cells, &format!("{}{row}", if i == 0 { lead } else { &pad }), style)).collect()
+}
+
 pub fn wrapped(cells: usize, text: &str, style: Style) -> Vec<Line<'static>> {
     wrap(text, cells.max(1)).iter().map(|line| plain(cells, line, style)).collect()
 }
@@ -1121,6 +1137,16 @@ mod tests {
         assert_eq!(width(&visible(&line)), 20);
         assert!(visible(&line).ends_with("  3s"));
         assert_eq!(line.spans[1].style.bg, Some(Color::Indexed(237)));
+    }
+
+    #[test]
+    fn help_row_wraps_by_word_under_its_description() {
+        let rows = help_row(30, "mouse", "wheel moves · click picks · double-click opens");
+        let text: Vec<String> = rows.iter().map(visible).collect();
+        assert_eq!(text, ["  mouse       wheel moves ·", "              click picks ·", "              double-click", "              opens"].map(|t| format!("{t:<30}")));
+        assert_eq!(help_row(30, "q", "quit").len(), 1);
+        let note: Vec<String> = hanging(20, "  ⏸ ", "waiting for a permission answer", dim()).iter().map(visible).collect();
+        assert_eq!(note, ["  ⏸ waiting for a", "    permission", "    answer"].map(|t| format!("{t:<20}")));
     }
 
     #[test]
