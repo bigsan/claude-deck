@@ -654,6 +654,11 @@ impl Transcript {
                     changed = true;
                 }
             }
+            // only the messages themselves: an api-request-blob, a copy of what was sent
+            // with no timestamp, carries the same tool calls ahead of the real record
+            if record["type"].as_str().is_some_and(|t| t != "assistant" && t != "user") {
+                continue;
+            }
             let Some(blocks) = record["message"]["content"].as_array() else { continue };
             for block in blocks {
                 match block["type"].as_str() {
@@ -1111,6 +1116,27 @@ mod tests {
         let last = s.prompts.last().unwrap();
         assert_eq!((last.done, last.until, s.turn_calls(last).len()), (false, None, 1));
         assert!(!s.refresh());
+    }
+
+    #[test]
+    fn a_request_copy_ahead_of_the_real_record_does_not_set_the_call() {
+        let dir = tempdir("blob");
+        let session = dir.join("slug").join("sess");
+        fs::create_dir_all(&session).unwrap();
+        let use_ = json!({ "type": "tool_use", "id": "t1", "name": "Bash", "input": { "command": "cat x" } });
+        let result = json!({ "type": "tool_result", "tool_use_id": "t1", "content": "x" });
+        let rows = [
+            json!({ "type": "api-request-blob", "hash": "h", "message": { "role": "assistant", "content": [use_] } }),
+            json!({ "type": "api-request-blob", "hash": "h", "message": { "role": "user", "content": [result] } }),
+            json!({ "type": "assistant", "timestamp": "2026-10-22T06:00:00.000Z", "message": { "role": "assistant", "content": [use_] } }),
+            json!({ "type": "user", "timestamp": "2026-10-22T06:00:02.000Z", "message": { "role": "user", "content": [result] } }),
+        ];
+        let transcript = dir.join("sess.jsonl");
+        fs::write(&transcript, rows.iter().map(|r| r.to_string() + "\n").collect::<String>()).unwrap();
+        let mut s = Session::new(session, Some(transcript));
+        s.refresh();
+        let call = &s.calls["t1"];
+        assert_eq!((call.started, call.duration_ms()), (parse_ts("2026-10-22T06:00:00.000Z"), Some(2000.0)));
     }
 
     #[test]
