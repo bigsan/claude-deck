@@ -61,7 +61,11 @@ release workflow refuses a tag that does not match.
    brew update && brew upgrade claude-deck && brew test claude-deck
    ```
 
-4. Publish the crate: `cargo publish` (after `cargo publish --dry-run`).
+4. Publish the crate: `cargo publish` (after `cargo publish --dry-run`). Then
+   `rm -rf target/package`: both build the packaged copy in `target/package/` into the
+   same `target/`, under the same hash as the checkout, so until that copy is gone
+   `cargo build` checks it instead of `src/`, calls itself fresh after every edit and
+   leaves `target/debug/claude-deck` at the published version.
 
 The herdr marketplace picks the new manifest up by itself (see below), and
 `herdr plugin update` installs the release binary of the new version.
